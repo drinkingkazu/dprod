@@ -1,0 +1,64 @@
+# NERSC Perlmutter. Controller runs on a login node with python3 + PyYAML
+# (e.g. `module load python`).
+name: nersc
+scheduler: slurm
+max_array_size: 1000          # TODO: confirm (MaxArraySize on Perlmutter)
+
+storage_root: /global/cfs/cdirs/TODO_PROJECT/doraemon   # TODO
+log_root: /global/cfs/cdirs/TODO_PROJECT/doraemon/joblog
+# Perlmutter compute nodes have no local NVMe; /tmp is RAM-backed (counts
+# against job memory). Use $PSCRATCH if outputs are large.
+work_root: "/tmp"
+keep_failed_workdir: false
+
+container:
+  # Shifter needs the image pulled in advance: shifterimg pull <image>
+  exec: "shifter --image={image} {flags}"
+  flags: ""
+
+images:
+  stage1: docker:TODO/larcv2_ub2204-cuda121-torch251-larndsim:2025-03-20   # TODO
+  stage23: docker:TODO/doraemon-test:latest                               # TODO
+
+vars:
+  edepsim_exe: edep-sim
+  edepsim_dir: /global/cfs/cdirs/TODO_PROJECT/sw/edep-sim          # source checkouts, recorded in provenance
+  dlpgen_dir: /global/cfs/cdirs/TODO_PROJECT/sw/DLPGenerator
+  jaxtpc_dir: /global/cfs/cdirs/TODO_PROJECT/sw/JAXTPC
+  pysupera_dir: /global/cfs/cdirs/TODO_PROJECT/sw/pysupera
+
+env:
+  edepsim:
+    PATH: /global/cfs/cdirs/TODO_PROJECT/sw/edep-sim/install/bin:/global/cfs/cdirs/TODO_PROJECT/sw/DLPGenerator/bin:$PATH
+    LD_LIBRARY_PATH: /global/cfs/cdirs/TODO_PROJECT/sw/edep-sim/install/lib:/global/cfs/cdirs/TODO_PROJECT/sw/DLPGenerator/build/lib:$LD_LIBRARY_PATH
+
+slurm:
+  default:
+    nodes: 1
+    ntasks: 1
+    account: TODO_PROJECT
+    qos: regular
+    # Tell slurm which shifter image the job uses ({image} = the stage's image).
+    extra: ["--image={image}"]
+  profiles:
+    cpu:
+      constraint: cpu
+      cpus_per_task: 2
+      mem: 12G
+      time: "02:00:00"
+      qos: shared          # sub-node CPU jobs
+    gpu:
+      constraint: gpu
+      gpus: 1
+      cpus_per_task: 32
+      time: "02:00:00"
+      account: TODO_PROJECT_g
+      container_flags: --module=gpu
+
+# Monitoring page (dprod web / dprod watch --web): index.html + status.json.
+web:
+  dir: /global/cfs/cdirs/TODO_PROJECT/www/doraemon/{campaign}   # served at https://portal.nersc.gov/cfs/TODO_PROJECT/doraemon/{campaign}/
+  # publish: "rsync -a {dir}/ user@host:/var/www/doraemon/{campaign}/"   # optional, after each write
+  refresh_s: 600          # expected live update interval; the page flags live data stale after ~3x this
+  job_rebuild_s: 300      # finishing jobs rebuild the job-records view (jobs.json) at most this often
+  job_snapshot: true      # jobs keep jobs.json current, so the page works without `dprod watch`

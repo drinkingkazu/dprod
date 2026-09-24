@@ -1,0 +1,48 @@
+# Small campaign for tests/run_local_test.sh (site: local).
+campaign: localtest_doraemon_v0.0
+seed: 12345
+max_attempts: 2
+stages:
+  edepsim:
+    alias: "1"
+    handler: edepsim
+    profile: cpu
+    n_jobs: 6
+    events_per_job: 3
+    input_dir: configs/edepsim
+    geometry: BigLArCube.gdml
+    macro: biglarbox.mac
+    generator_config: mpvmpr.yaml
+    monitor_interval: 1
+    provenance:
+      software:
+        edep-sim_src: "{edepsim_dir}"
+        DLPGenerator: "{dlpgen_dir}"
+  jaxtpc_wire:
+    alias: 2A
+    parent: edepsim
+    merge: 2
+    profile: gpu
+    command: >-
+      python3 {test_dir}/fake_jaxtpc.py --data {inputs} --outdir {outdir}
+      --dataset sim_wire --fail-dir {fail_dir} --first-job {first_job} --gpu-seconds 8
+    monitor_gpu: true             # the local site's gpu profile requests no GPUs
+    vars:
+      detector_config: "{test_dir}/fake_detector.yaml"
+    provenance:
+      roles: [sensor]
+      files:
+        detector_config: "{detector_config}"
+      software:
+        fake_jaxtpc: "{test_dir}/fake_jaxtpc.py"
+    monitor_interval: 1
+    outputs: "*/run_*/*.h5"
+    id_reader: jaxtpc
+  supera_wire:
+    alias: 3A
+    parent: jaxtpc_wire
+    merge: 1
+    enabled: false
+    profile: cpu
+    command: "true"
+    id_reader: jaxtpc

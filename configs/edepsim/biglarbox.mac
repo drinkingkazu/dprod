@@ -1,0 +1,24 @@
+
+/random/setSeeds 1 2
+/edep/random/timeRandomSeed
+
+/process/eLoss/fluct 0
+
+/edep/storeNeutralStepAsPoint 1
+/edep/avoidHitMerging lar_vol 1
+/edep/hitSeparation lar_vol -1 mm
+/edep/hitSagitta drift 1.0 mm
+/edep/hitLength drift 1.0 mm
+/edep/db/set/neutronThreshold 0 MeV
+/edep/db/set/lengthThreshold 0 mm
+/edep/db/set/gammaThreshold 0 MeV
+#/edep/random/timeRandomSeed
+/edep/update
+
+/generator/kinematics/bomb/config mpvmpr.yaml
+/generator/kinematics/bomb/verbose 0
+/generator/kinematics/set bomb 
+
+/generator/count/fixed/number 1
+/generator/count/set fixed
+/generator/add

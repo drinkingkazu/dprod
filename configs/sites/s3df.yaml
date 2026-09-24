@@ -1,0 +1,57 @@
+# S3DF (SLAC). Controller runs on a login node (sdfiana / s3dflogin) with python3 + PyYAML.
+name: s3df
+scheduler: slurm
+max_array_size: 100          # S3DF limit; larger submissions are split into several arrays
+
+storage_root: /sdf/data/neutrino/doraemon      # campaign dirs: <storage_root>/<campaign>/
+log_root: /sdf/group/neutrino/doraemon/joblog  # slurm logs: <log_root>/<campaign>/<stage>/
+work_root: "$LSCRATCH"                         # per-job local NVMe, expanded on the node
+keep_failed_workdir: false
+
+container:
+  exec: "apptainer exec {flags} -B /sdf,/lscratch {image}"
+  exec_login: "apptainer exec -B /sdf {image}"   # for dprod merge-summary on sdfiana
+  flags: ""
+
+images:
+  stage1:  /sdf/group/neutrino/images/develop.sif
+  stage23: /sdf/data/neutrino/images/doraemon/t1-lartpc-cuda12-latest.sif
+
+# Variables available to stage command templates, e.g. {jaxtpc_dir}.
+vars:
+  edepsim_exe: edep-sim
+  edepsim_dir:  /sdf/group/neutrino/kterao/sw/doraemon/src/edep-sim
+  dlpgen_dir:   /sdf/group/neutrino/kterao/sw/doraemon/src/DLPGenerator
+  jaxtpc_dir:   /sdf/group/neutrino/kterao/sw/doraemon/src/JAXTPC
+  pysupera_dir: /sdf/group/neutrino/kterao/sw/doraemon/src/pysupera
+
+# Environment inside the container, per stage name ("all" applies to every stage).
+env:
+  edepsim:
+    PATH: /sdf/group/neutrino/kterao/sw/doraemon/src/edep-sim/install/bin:/sdf/group/neutrino/kterao/sw/doraemon/src/DLPGenerator/bin:$PATH
+    LD_LIBRARY_PATH: /sdf/group/neutrino/kterao/sw/doraemon/src/edep-sim/install/lib:/sdf/group/neutrino/kterao/sw/doraemon/src/DLPGenerator/build/lib:$LD_LIBRARY_PATH
+  all:
+    PYTHONNOUSERSITE: "1"
+
+slurm:
+  default:
+    nodes: 1
+    ntasks: 1
+    account: mli:nu-ml-dev
+    qos: preemptable
+    requeue: false        # preempted jobs show up as failed and are resubmitted by `dprod recover`
+  profiles:
+    cpu:
+      partition: milano
+      cpus_per_task: 1
+      mem_per_cpu: 12G
+      time: "02:00:00"
+    gpu:
+      partition: ampere
+      gpus: 1
+      cpus_per_task: 28
+      mem: 230016M
+      time: "02:00:00"
+      account: neutrino:ml-dev
+      qos: null           # unset -> scheduler default
+      container_flags: --nv

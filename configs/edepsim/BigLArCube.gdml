@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<gdml xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://service-spi.web.cern.ch/service-spi/app/releases/GDML/schema/gdml.xsd">
+  <define>
+    <position name="lar_vol_1intoppos" x="0" y="0" z="0" unit="cm"/>
+  </define>
+  <materials>
+    <material name="vacuum" Z="1">
+      <D unit="g/cm3" value="0"/>
+      <atom unit="g/mole" value="0"/>
+    </material>
+    <material name="lar" Z="18">
+      <D unit="g/cm3" value="1.3954"/>
+      <atom unit="g/mole" value="39.948"/>
+    </material>
+  </materials>
+  <solids>
+    <box name="top" x="500" y="500" z="500" lunit="cm"/>
+    <box name="lar_box" x="400" y="400" z="400" lunit="cm"/>
+  </solids>
+  <structure>
+    <volume name="lar_vol">
+      <auxiliary auxtype="SensDet" auxvalue="lar_vol"/>
+      <materialref ref="lar"/>
+      <solidref ref="lar_box"/>
+      <auxiliary auxtype="EField" auxvalue="(500.0 V/cm, 0.0 V/cm, 0.0 V/cm)"/>
+      <auxiliary auxtype="StepLimit" auxvalue="0.3 mm"/>
+    </volume>
+    <volume name="top">
+      <materialref ref="vacuum"/>
+      <solidref ref="top"/>
+      <physvol name="lar_vol_1" copynumber="1">
+        <volumeref ref="lar_vol"/>
+        <positionref ref="lar_vol_1intoppos"/>
+      </physvol>
+    </volume>
+  </structure>
+  <setup name="default" version="1.0">
+    <world ref="top"/>
+  </setup>
+</gdml>

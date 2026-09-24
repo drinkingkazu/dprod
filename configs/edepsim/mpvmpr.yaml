@@ -1,0 +1,155 @@
+# ===============
+# mpvmpr.yaml
+# ===============
+
+
+SEED: -1
+## with lepton, generate 20cm from the wall
+Generator1:
+  NumEvent: [0,6]
+  NumParticle: [1,10]
+  XRange: [-2160, 2160] #mm
+  YRange: [-2160, 2160] #mm
+  ZRange: [-2160, 2160] #mm
+  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  AddParent: True
+  Particles:
+    -
+      PDG:      [11,-11]
+      NumRange: [1,1]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [211,-211,111]
+      NumRange: [0,3]
+      KERange:  [0.06,1.3]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [22]
+      NumRange: [0,2]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [2212]
+      NumRange: [0,6]
+      KERange:  [0.2,0.65]
+      UseMom:   True
+      Weight:   1
+
+
+Generator2:
+  NumEvent: [0,6]
+  NumParticle: [1,10]
+  XRange: [-2160, 2160] #mm
+  YRange: [-2160, 2160] #mm
+  ZRange: [-2160, 2160] #mm
+  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  AddParent: True
+  Particles:
+    -
+      PDG:      [13,-13]
+      NumRange: [1,1]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [211,-211,111]
+      NumRange: [0,3]
+      KERange:  [0.06,1.3]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [22]
+      NumRange: [0,2]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [2212]
+      NumRange: [0,6]
+      KERange:  [0.2,0.65]
+      UseMom:   True
+      Weight:   1
+
+
+
+Generator3:
+  NumEvent: [0,6]
+  NumParticle: [1,6]
+  XRange: [-2160, 2160] #mm
+  YRange: [-2160, 2160] #mm
+  ZRange: [-2160, 2160] #mm
+  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  AddParent: True
+  Particles:
+    -
+      PDG:      [211,-211,111]
+      NumRange: [0,3]
+      KERange:  [0.06,1.3]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [22]
+      NumRange: [0,2]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [2212]
+      NumRange: [0,6]
+      KERange:  [0.2,0.65]
+      UseMom:   True
+      Weight:   2
+
+
+
+Generator4:
+  NumEvent: [4,16]
+  NumParticle: [1,1]
+  XRange: [-2160, 2160] #mm
+  YRange: [-2160, 2160] #mm
+  ZRange: [-1260, 2160] #mm
+  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  AddParent: True
+  ShootInward: True
+  Particles:
+    -
+      PDG:      [13,-13]
+      NumRange: [0,12]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   2
+
+
+    -
+      PDG:      [11,-11]
+      NumRange: [0,3]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [22]
+      NumRange: [0,3]
+      KERange:  [0.01,1.2]
+      UseMom:   True
+      Weight:   1
+
+    -
+      PDG:      [2212]
+      NumRange: [0,12]
+      KERange:  [0.2,0.65]
+      UseMom:   True
+      Weight:   1
+

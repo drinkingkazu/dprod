@@ -1,0 +1,12 @@
+# editor backups
+*~
+.*.swp
+
+# python
+__pycache__/
+*.pyc
+
+# local outputs (installation tests, scratch)
+install_test_*/
+*.log
+CLAUDE.md

@@ -1,0 +1,35 @@
+# Local development/testing: runs array elements sequentially on this machine,
+# without a container prefix. Run the controller *inside* the container, e.g.
+#   apptainer exec -B /home/kazu <stage-1 image> bin/dprod --site local ...
+# Requires DPROD_LOCAL_ROOT (directory for campaign data and logs).
+name: local
+scheduler: local
+max_array_size: 4           # small, so tests exercise array splitting
+
+storage_root: $DPROD_LOCAL_ROOT/storage
+log_root: $DPROD_LOCAL_ROOT/joblog
+work_root: "$DPROD_LOCAL_ROOT/work"
+keep_failed_workdir: false
+
+container:
+  exec: ""                  # no container prefix
+
+images: {}
+
+vars:
+  edepsim_exe: edep-sim
+  edepsim_dir: /home/kazu/sw/edep-sim          # source checkouts, recorded in provenance
+  dlpgen_dir: /home/kazu/sw/dlp_generator/DLPGenerator
+  jaxtpc_dir: /home/kazu/sw/doraemon/JAXTPC
+  pysupera_dir: /home/kazu/sw/scratch/pysupera
+
+env:
+  edepsim:
+    PATH: /home/kazu/sw/edep-sim/install/bin:/home/kazu/sw/dlp_generator/DLPGenerator/bin:$PATH
+    LD_LIBRARY_PATH: /home/kazu/sw/edep-sim/install/lib:/home/kazu/sw/dlp_generator/DLPGenerator/build/lib:$LD_LIBRARY_PATH
+
+slurm:
+  default: {}
+  profiles:
+    cpu: {}
+    gpu: {}

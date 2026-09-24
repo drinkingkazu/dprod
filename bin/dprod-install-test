@@ -1,0 +1,5 @@
+#!/bin/bash
+# Installation test: 1 -> 2A -> 3A -> 2B -> 3B on this node, outside slurm.
+# See `dprod-install-test --help`. Run it on a GPU node (JAXTPC needs one).
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec env PYTHONPATH="${HERE}${PYTHONPATH:+:$PYTHONPATH}" python3 -m doraemon_prod.install_test "$@"

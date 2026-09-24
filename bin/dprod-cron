@@ -1,0 +1,31 @@
+#!/bin/bash
+# One scheduled round of production for one or more campaigns (scrontab / cron).
+#
+#   dprod-cron --site s3df CAMPAIGN [CAMPAIGN ...] [-- extra `dprod watch` options]
+#
+# For each campaign: sync with slurm, submit every ready task of every enabled
+# stage (plus retries of failed ones), update the monitoring page and the
+# summary HDF5 files -- i.e. `dprod watch --once --recover --web --merge-summary`.
+# Options after `--` are added, e.g. `-- --max-queued 300 --partition roma`.
+# Rounds that overlap wait for the campaign lock; they never double-submit.
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+SITE=""; CAMPAIGNS=(); EXTRA=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --site) SITE="$2"; shift 2 ;;
+    --) shift; EXTRA=("$@"); break ;;
+    *) CAMPAIGNS+=("$1"); shift ;;
+  esac
+done
+[ -n "$SITE" ] && [ ${#CAMPAIGNS[@]} -gt 0 ] || { echo "usage: $0 --site SITE CAMPAIGN [...] [-- watch options]"; exit 2; }
+if ! python3 -c "import yaml" 2>/dev/null; then
+  echo "dprod-cron: python3 on $(hostname) has no PyYAML; run once: python3 -m pip install --user pyyaml"
+  exit 1
+fi
+rc=0
+for C in "${CAMPAIGNS[@]}"; do
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') $(hostname) campaign $C"
+  "$HERE/bin/dprod" --site "$SITE" --campaign "$C" watch --once --recover --web --merge-summary "${EXTRA[@]}" || rc=$?
+done
+echo "=== $(date '+%Y-%m-%d %H:%M:%S') done (exit $rc)"
+exit $rc

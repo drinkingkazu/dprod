@@ -1,0 +1,12 @@
+# Stand-in detector configuration for the local test (embedded as provenance).
+detector:
+  name: fake_wire_tpc
+  volumes:
+    - {id: 0, drift_axis: x, range_cm: [-200.0, 0.0]}
+    - {id: 1, drift_axis: x, range_cm: [0.0, 200.0]}
+  planes: [U, V, Y]
+  wire_pitch_mm: 3.0
+electronics:
+  adc_bits: 12
+  noise: null
+  shaping_time_us: 2.0
