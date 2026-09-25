@@ -47,6 +47,13 @@ slurm:
       mem: 12G
       time: "02:00:00"
       qos: shared          # sub-node CPU jobs
+    cron:                 # controller rounds (bin/dprod-cron --loop); used alone
+      constraint: cpu
+      qos: shared
+      account: TODO_PROJECT
+      cpus_per_task: 1
+      mem: 4G
+      time: "00:30:00"
     gpu:
       constraint: gpu
       gpus: 1

@@ -266,11 +266,43 @@ Output, organized per stage for inspection:
 ```
 It exits 0 only if every stage succeeded and every file check passed.
 
-## Automated production with scrontab (S3DF)
+## Automated production (S3DF)
 
 `bin/dprod-cron` does one round per campaign: sync with slurm, submit everything that is ready in every
-enabled stage (plus retries), update the monitoring page and the summary HDF5 files. Scheduled with
-`scrontab`, each round is a short slurm job, so nothing has to stay logged in.
+enabled stage (plus retries), update the monitoring page and the summary HDF5 files.
+
+### Controller chain (works without scrontab)
+
+```bash
+bin/dprod-cron --loop 15m --site s3df test_doraemon_2026_smoke_v0.0     # start
+bin/dprod-cron --status --site s3df                                       # jobs of the chain + log tail
+bin/dprod-cron --stop --site s3df                                         # stop
+```
+* **How it works:** `--loop` submits a small batch job (1 CPU, 4 GB, 30 min). Every such job **first queues the next round**
+  with `sbatch --begin=now+15m`, then runs one round, so a round that fails doesn't end the chain. Nothing stays
+  logged in.
+* **Guards:** a round doesn't queue another one if the next is already queued, or after `--stop`. `--stop` writes a stop
+  file and cancels the chain's jobs. `--loop` refuses to start a second chain with the same name.
+* **Slurm settings:** the round jobs have their own profile, `slurm.profiles.cron` in the site config, used **alone**:
+  it isn't merged with `slurm.default` or the `cpu` profile, so e.g. S3DF's preemptable default QOS doesn't apply.
+  1 CPU, 4 GB and 30 min are the defaults beneath it. `--partition`, `--account`, `--qos` and `--time` (before `--`)
+  override it for one chain. Without a `cron` profile, `--loop` stops and prints an example to add:
+  ```yaml
+  slurm:
+    profiles:
+      cron:
+        partition: milano
+        account: mli:nu-ml-dev
+        qos: <non-preemptable QOS>
+  ```
+* **Campaigns:** they must exist first (`bin/dprod init`); `--loop` refuses campaigns that aren't initialized.
+* **Options:** options after `--` go to the rounds' `watch`, e.g. `-- --max-queued 300` or
+  `-- --partition roma --account X` for the production jobs it submits. Several campaigns can be listed.
+  `--name` runs independent chains side by side.
+* **Files:** the job script and an appending log are `<log_root>/cron/<name>.sh` and `<name>.log`.
+* **Needs:** `sbatch`/`squeue` on compute nodes, and python3 with PyYAML there (see step 1 below).
+
+### scrontab (where it's enabled)
 
 1. Check once that python on a compute node has PyYAML (install it for yourself if not):
    ```bash
