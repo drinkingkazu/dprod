@@ -41,12 +41,15 @@ def collect(c):
             counts[r["status"]] = r["n"]
         # queued vs running comes from the attempts (a task's status is 'submitted' or 'running')
         done = con.execute(
-            "SELECT a.end_time t, a.wall_s, a.elapsed_s, a.max_rss_mb, a.avg_rss_mb,"
+            "SELECT a.task_id, a.end_time t, a.wall_s, a.elapsed_s, a.max_rss_mb, a.avg_rss_mb,"
             " a.gpu_util_pct, a.gpu_mem_used_mb, t.n_events FROM attempts a JOIN tasks t"
             " ON t.stage = a.stage AND t.task_id = a.task_id AND t.n_attempts = a.attempt"
             " WHERE a.stage = ? AND a.state = 'done' AND t.status = 'done'", (name,)).fetchall()
+        sizes = {r[0]: r[1] for r in con.execute(
+            "SELECT task_id, SUM(size) FROM files WHERE stage = ? GROUP BY task_id", (name,))}
         stats = stage_stats([{"t": r["t"], "wall": r["wall_s"] or r["elapsed_s"],
-                              "events": r["n_events"], "max_rss": r["max_rss_mb"],
+                              "events": r["n_events"], "bytes": sizes.get(r["task_id"]),
+                              "max_rss": r["max_rss_mb"],
                               "avg_rss": r["avg_rss_mb"], "gpu_util": r["gpu_util_pct"],
                               "gpu_mem": r["gpu_mem_used_mb"]} for r in done])
         n_att = con.execute("SELECT COUNT(*) FROM attempts WHERE stage = ?", (name,)).fetchone()[0]
@@ -314,6 +317,26 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     <h2>Wall time per task</h2>
     <p class="desc">Distribution over successful tasks, one panel per stage.</p>
     <div class="multiples" id="hists"></div>
+  </section>
+  <section class="card">
+    <h2>Output data size per task</h2>
+    <p class="desc">Total size of all output files of a task, over successful tasks.</p>
+    <div class="multiples" id="hsize"></div>
+  </section>
+  <section class="card">
+    <h2>Peak RAM per task</h2>
+    <p class="desc">Peak resident memory of the job (process tree), over successful tasks.</p>
+    <div class="multiples" id="hram"></div>
+  </section>
+  <section class="card">
+    <h2>GPU memory per task</h2>
+    <p class="desc">GPU memory used, time-averaged over the job (GPU stages only). JAX reserves most of the card up front by default.</p>
+    <div class="multiples" id="hgpumem"></div>
+  </section>
+  <section class="card">
+    <h2>GPU utilization per task</h2>
+    <p class="desc">GPU utilization, time-averaged over the job (GPU stages only).</p>
+    <div class="multiples" id="hgpuutil"></div>
   </section>
   <section class="card">
     <h2>Recent failures</h2>
@@ -633,7 +656,7 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     var box = document.getElementById("stattable"); box.textContent = "";
     var table = h("table", null, null, box);
     var cols = ["Stage", "Tasks", "Done", "Running", "Queued", "Failed", "Aband.", "Events",
-                "Data", "Wall median", "Wall mean", "Wall max", "RAM avg", "RAM max", "GPU util", "GPU mem", "Failure rate"];
+                "Data", "Wall avg", "Wall max", "RAM avg", "RAM max", "GPU util", "GPU mem", "Failure rate"];
     var hr = h("tr", null, null, h("thead", null, null, table));
     cols.forEach(function (c, i) { h("th", i ? "num" : null, c, hr); });
     var body = h("tbody", null, null, table);
@@ -642,7 +665,7 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
       h("td", null, s.alias + " " + s.name + (s.enabled ? "" : " (disabled)"), tr);
       [fmt(s.tasks), fmt(s.counts.done), fmt(D.active[s.name].running), fmt(D.active[s.name].queued),
        fmt(s.counts.failed), fmt(s.counts.abandoned), fmt(s.events), fmtBytes(s.bytes),
-       fmtDur(s.wall.p50), fmtDur(s.wall.mean), fmtDur(s.wall.max), fmtMB(s.ram_avg), fmtMB(s.ram_max),
+       fmtDur(s.wall.mean), fmtDur(s.wall.max), fmtMB(s.ram_avg), fmtMB(s.ram_max),
        s.gpu_util === null ? "–" : Math.round(s.gpu_util) + "%", fmtMB(s.gpu_mem),
        s.attempts ? (100 * s.failed_attempts / s.attempts).toFixed(1) + "%" : "–"
       ].forEach(function (v) { h("td", "num", v, tr); });
@@ -650,44 +673,66 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
   }
 
   // ---- wall-time histograms (small multiples, one hue)
+  // per-task distributions, one card per quantity, one small histogram per stage
+  var HISTS = [
+    {id: "hists", key: "wall", fmt: fmtDur, what: "wall time"},
+    {id: "hsize", key: "bytes", fmt: function (b) { return fmtBytes(b); }, what: "output size"},
+    {id: "hram", key: "max_rss", fmt: fmtMB, what: "peak RAM"},
+    {id: "hgpumem", key: "gpu_mem", fmt: fmtMB, what: "GPU memory"},
+    {id: "hgpuutil", key: "gpu_util", fmt: function (v) { return Math.round(v) + "%"; }, what: "GPU utilization"}
+  ];
   function renderHists() {
-    var box = document.getElementById("hists"); box.textContent = "";
-    var shown = D.stages.filter(function (s) { return s.wall_hist.length; });
-    if (!shown.length) { h("div", "empty", "No finished tasks yet.", box); return; }
-    shown.forEach(function (s) {
-      var cell = h("div", null, null, box);
-      h("h3", null, s.alias + " " + s.name, cell);
-      h("div", "muted", fmt(s.wall.n) + " tasks · median " + fmtDur(s.wall.p50), cell);
-      var W = 260, H = 130, m = {l: 34, r: 6, t: 10, b: 22};
-      var svg = el("svg", {width: W, height: H, role: "img", "aria-label": "Wall time histogram " + s.name}, cell);
-      var cmax = Math.max.apply(null, s.wall_hist.map(function (b) { return b[2]; }));
-      var yt = niceTicks(cmax, 3, true), ytop = yt[yt.length - 1];
-      var Y = function (v) { return m.t + (H - m.t - m.b) * (1 - v / ytop); };
-      var ax = el("g", {class: "axis"}, svg);
-      yt.forEach(function (v) {
-        el("line", {x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css(v === 0 ? "--axis" : "--grid"), "stroke-width": 1}, ax);
-        var tx = el("text", {x: m.l - 6, y: Y(v) + 4, "text-anchor": "end"}, ax); tx.textContent = fmt(v);
+    HISTS.forEach(function (spec) {
+      var box = document.getElementById(spec.id); box.textContent = "";
+      var shown = D.stages.filter(function (s) {
+        var d = (s.dists || {})[spec.key];
+        return d && d.hist && d.hist.length;
       });
-      var nb = s.wall_hist.length, slot = (W - m.l - m.r) / nb, bw = Math.min(24, slot - 2);
-      s.wall_hist.forEach(function (b, j) {
-        var x = m.l + j * slot + (slot - bw) / 2, y = Y(b[2]), hgt = Y(0) - y;
-        if (b[2] > 0) {
-          var r = Math.min(4, hgt);
-          var d = "M" + x + "," + Y(0) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y +
-                  "H" + (x + bw - r) + "Q" + (x + bw) + "," + y + " " + (x + bw) + "," + (y + r) + "V" + Y(0) + "Z";
-          el("path", {d: d, fill: css("--hist"), class: "seg"}, svg);
-        }
-        var hit = el("rect", {x: m.l + j * slot, y: m.t, width: slot, height: H - m.t - m.b, class: "hit", tabindex: 0}, svg);
-        hit.addEventListener("pointermove", function (e) {
-          showTip(e, fmtDur(b[0]) + " – " + fmtDur(b[1]), [{value: fmt(b[2]), label: "tasks"}]);
-        });
-        hit.addEventListener("pointerleave", hideTip);
-      });
-      var lo = el("text", {x: m.l, y: H - 6, class: "axis"}, svg); lo.textContent = fmtDur(s.wall_hist[0][0]);
-      lo.setAttribute("fill", css("--text-muted"));
-      var hi = el("text", {x: W - m.r, y: H - 6, "text-anchor": "end"}, svg); hi.textContent = fmtDur(s.wall_hist[nb - 1][1]);
-      hi.setAttribute("fill", css("--text-muted"));
+      var card = box.parentNode;
+      if (!shown.length) {
+        // GPU panels only make sense once a GPU stage has finished tasks
+        card.hidden = spec.key.indexOf("gpu") === 0;
+        h("div", "empty", "No finished tasks yet.", box);
+        return;
+      }
+      card.hidden = false;
+      shown.forEach(function (s) { histPanel(box, s, s.dists[spec.key], spec); });
     });
+  }
+  function histPanel(box, s, dist, spec) {
+    var hist = dist.hist;
+    var cell = h("div", null, null, box);
+    h("h3", null, s.alias + " " + s.name, cell);
+    h("div", "muted", fmt(dist.n) + " tasks · avg " + spec.fmt(dist.avg), cell);
+    var W = 260, H = 130, m = {l: 34, r: 6, t: 10, b: 22};
+    var svg = el("svg", {width: W, height: H, role: "img", "aria-label": spec.what + " histogram " + s.name}, cell);
+    var cmax = Math.max.apply(null, hist.map(function (b) { return b[2]; }));
+    var yt = niceTicks(cmax, 3, true), ytop = yt[yt.length - 1];
+    var Y = function (v) { return m.t + (H - m.t - m.b) * (1 - v / ytop); };
+    var ax = el("g", {class: "axis"}, svg);
+    yt.forEach(function (v) {
+      el("line", {x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css(v === 0 ? "--axis" : "--grid"), "stroke-width": 1}, ax);
+      var tx = el("text", {x: m.l - 6, y: Y(v) + 4, "text-anchor": "end"}, ax); tx.textContent = fmt(v);
+    });
+    var nb = hist.length, slot = (W - m.l - m.r) / nb, bw = Math.min(24, slot - 2);
+    hist.forEach(function (b, j) {
+      var x = m.l + j * slot + (slot - bw) / 2, y = Y(b[2]), hgt = Y(0) - y;
+      if (b[2] > 0) {
+        var r = Math.min(4, hgt);
+        var d = "M" + x + "," + Y(0) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y +
+                "H" + (x + bw - r) + "Q" + (x + bw) + "," + y + " " + (x + bw) + "," + (y + r) + "V" + Y(0) + "Z";
+        el("path", {d: d, fill: css("--hist"), class: "seg"}, svg);
+      }
+      var hit = el("rect", {x: m.l + j * slot, y: m.t, width: slot, height: H - m.t - m.b, class: "hit", tabindex: 0}, svg);
+      hit.addEventListener("pointermove", function (e) {
+        showTip(e, spec.fmt(b[0]) + " – " + spec.fmt(b[1]), [{value: fmt(b[2]), label: "tasks"}]);
+      });
+      hit.addEventListener("pointerleave", hideTip);
+    });
+    var lo = el("text", {x: m.l, y: H - 6}, svg); lo.textContent = spec.fmt(hist[0][0]);
+    lo.setAttribute("fill", css("--text-muted"));
+    var hi = el("text", {x: W - m.r, y: H - 6, "text-anchor": "end"}, svg); hi.textContent = spec.fmt(hist[nb - 1][1]);
+    hi.setAttribute("fill", css("--text-muted"));
   }
 
   // ---- failures
