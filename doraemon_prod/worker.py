@@ -456,6 +456,16 @@ class ResourceMonitor(threading.Thread):
         return out
 
 
+def _container_summary(image):
+    try:
+        from .provenance import container_info
+        info, _ = container_info(image)
+        info.pop("labels", None)
+        return info
+    except Exception as e:           # never fatal
+        return {"error": str(e)}
+
+
 def max_rss_mb():
     """Peak resident memory of this process and of its largest finished child (MB)."""
     kb = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
@@ -496,6 +506,7 @@ def run_task(m, index, work_root):
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "slurm_array_job_id": os.environ.get("SLURM_ARRAY_JOB_ID"),
         "seeds": task["seeds"], "start": time.time(), "status": "failed",
+        "container": _container_summary(m.get("image")),
         "expected_events": task.get("expected_events"),
         "n_input_jobs": task.get("n_input_jobs"),
         "reason": None, "files": [], "warnings": [], "n_events": 0,

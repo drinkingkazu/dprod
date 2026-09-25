@@ -26,6 +26,10 @@ the full chain back to the generator:
         config/<name>/          the same file as a dictionary, if YAML/JSON
         software/<name>/        @path, @git_commit/@git_dirty/@git_describe/@git_remote,
                                 @sha256 for executables
+        container/              the image the job ran in: @runtime @path @size @mtime_iso
+                                @head_tail_sha256 (size + first/last 4 MiB) @build_date
+                                @definition_sha256, labels/ (the image labels); the
+                                definition file itself is files/container_definition
         environment/            environment variables set for the stage
         inputs                  [string array] input file names
     _blobs/<sha256>             storage of the texts; every files/<name> is a hard
@@ -170,6 +174,63 @@ def software_info(path):
     return info
 
 
+def _head_tail_sha256(path, chunk=4 << 20):
+    """SHA-256 of size + first and last `chunk` bytes: a cheap fingerprint of a large
+    file (a rebuilt image differs even if its modification time was preserved)."""
+    size = os.path.getsize(path)
+    h = hashlib.sha256(str(size).encode())
+    with open(path, "rb") as f:
+        h.update(f.read(chunk))
+        if size > chunk:
+            f.seek(max(chunk, size - chunk))
+            h.update(f.read(chunk))
+    return h.hexdigest()
+
+
+SINGULARITY_D = "/.singularity.d"
+
+
+def container_info(image_hint=None):
+    """What container this job runs in: (info dict, definition file text or None).
+
+    From inside the container: the image path apptainer/singularity reports
+    (or the configured one), its size, modification time and head/tail fingerprint,
+    the image labels (build date, base image, ...) and the definition file.
+    """
+    env = os.environ
+    path = env.get("APPTAINER_CONTAINER") or env.get("SINGULARITY_CONTAINER") or image_hint or ""
+    runtime = ("apptainer" if env.get("APPTAINER_CONTAINER") else
+               "singularity" if env.get("SINGULARITY_CONTAINER") else
+               "shifter" if env.get("SHIFTER_IMAGEREQUEST") or env.get("SHIFTER_RUNTIME") else "none")
+    info = {"runtime": runtime, "path": path, "configured": image_hint or ""}
+    if env.get("SHIFTER_IMAGEREQUEST"):
+        info["shifter_image"] = env["SHIFTER_IMAGEREQUEST"]
+    if path and os.path.isfile(path):
+        st = os.stat(path)
+        info.update({"size": st.st_size, "mtime": st.st_mtime,
+                     "mtime_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
+                     "head_tail_sha256": _head_tail_sha256(path)})
+    elif path and os.path.isdir(path):
+        info["sandbox"] = True
+    labels, deffile = {}, None
+    try:
+        with open(os.path.join(SINGULARITY_D, "labels.json")) as f:
+            labels = json.load(f)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(SINGULARITY_D, "Singularity"), errors="replace") as f:
+            deffile = f.read()
+    except OSError:
+        pass
+    info["labels"] = {str(k): str(v) for k, v in labels.items()}
+    if labels.get("org.label-schema.build-date"):
+        info["build_date"] = str(labels["org.label-schema.build-date"])
+    if deffile:
+        info["definition_sha256"] = sha256_text(deffile)
+    return info, deffile
+
+
 def parse_config(path, text):
     """Parse YAML/JSON config text into a dict (None if not parseable/applicable)."""
     ext = os.path.splitext(path)[1].lower()
@@ -226,6 +287,11 @@ def collect(m, task, files=None, software=None, command=None, inputs=None, env=N
             rec["config"][name] = d
     for name, path in (software or {}).items():
         rec["software"][name] = software_info(path)
+    info, deffile = container_info(m.get("image"))
+    rec["container"] = info
+    if deffile:
+        rec["files"]["container_definition"] = {"text": deffile, "path": SINGULARITY_D + "/Singularity",
+                                                "sha256": sha256_text(deffile)}
     return rec
 
 
@@ -258,6 +324,7 @@ def _write_task_block(prov, blk, rec):
         fg.attrs[name + ".sha256"] = info["sha256"]
     dict_to_group(blk.create_group("config"), rec["config"])
     dict_to_group(blk.create_group("software"), rec["software"])
+    dict_to_group(blk.create_group("container"), rec.get("container") or {})
     dict_to_group(blk.create_group("environment"), rec["environment"])
     blk.create_dataset("inputs", data=np.array(rec["inputs"], dtype=object), dtype=STR)
 

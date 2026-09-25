@@ -444,6 +444,10 @@ the output was made from, so a file carries the whole chain back to the generato
                           (@<name>.path, @<name>.sha256 on files/)
       config/             generator_config as a dictionary
       software/           edep-sim (@path @sha256), edep-sim_src, DLPGenerator (@git_commit @git_dirty ...)
+      container/          the image the job ran in: @runtime @path @size @mtime_iso @build_date
+                          @head_tail_sha256 (fingerprint: size + first/last 4 MiB, cheap for multi-GB images)
+                          @definition_sha256, labels/ (base image, version, ...); the definition file
+                          itself is files/container_definition
       environment/        @PATH @LD_LIBRARY_PATH ...
       inputs              [string array]
   jaxtpc_wire/            stage block
@@ -461,6 +465,11 @@ the output was made from, so a file carries the whole chain back to the generato
   present in the output file.
 * Text is deduplicated within a file: a large GDML shared by N merged jobs is stored once. The
   per-job macro and generator YAML differ because each contains that job's seeds.
+* **Container:** every task block records the image it actually ran in, as seen from inside the job. That's the image
+  path apptainer reports, its size and modification time, and a head/tail SHA-256 fingerprint, so a rebuilt image
+  with the same name can be told apart. Also the labels stored in the image (build date, base image) and its
+  definition file. With shifter, the image name. Job summaries carry the same information, and
+  `dprod-install-test` shows it per file.
 * **Stage 1 (edep-sim)** gets these automatically: the geometry, the macro and the generator YAML *as
   executed* (with the per-job seeds and run id), and the edep-sim binary. Source checkouts
   come from the stage's `provenance.software` (`{edepsim_dir}`, `{dlpgen_dir}` in the site config).
