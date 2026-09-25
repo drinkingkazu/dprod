@@ -8,6 +8,12 @@ log_root: /sdf/group/neutrino/doraemon/joblog  # slurm logs: <log_root>/<campaig
 work_root: "$LSCRATCH"                         # per-job local NVMe, expanded on the node
 keep_failed_workdir: false
 
+web:
+  dir: /sdf/data/neutrino/public_html/dprod/{campaign}
+  refresh_s: 90          # expected live update interval; older live data is flagged stale
+  job_rebuild_s: 60      # finishing jobs rebuild the job-records view at most this often
+  job_snapshot: true      # jobs keep it current, so the page works without `dprod watch`
+  
 container:
   exec: "apptainer exec {flags} -B /sdf,/lscratch {image}"
   exec_login: "apptainer exec -B /sdf {image}"   # for dprod merge-summary on sdfiana
