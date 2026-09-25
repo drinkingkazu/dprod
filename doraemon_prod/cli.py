@@ -510,10 +510,14 @@ def _check_image(site, s, report, variables=None):
             pp.append(str(p).format(**(variables or {})))
         except KeyError as e:
             report(False, "pythonpath %s" % p, "unknown variable %s" % e)
-    key = (prefix, tuple(mods), tuple(pp))
+    # the environment the job's stage command gets (site `env`, stage `env`), so that
+    # e.g. PYTHONNOUSERSITE or a PATH change affects the check as it affects the job
+    env = C.stage_env(site, s)
+    exports = "".join('export %s="%s"; ' % (k, str(v).replace('"', '\\"')) for k, v in sorted(env.items()))
+    exports += 'export PYTHONPATH=%s${PYTHONPATH:+:$PYTHONPATH}; ' % shlex.quote(":".join(pp + [C.REPO_DIR]))
+    key = (prefix, tuple(mods), tuple(pp), tuple(sorted(env.items())))
     if key not in _IMAGE_CHECKED:
-        cmd = "%s env PYTHONPATH=%s python3 -c %s" % (
-            prefix, shlex.quote(":".join(pp + [C.REPO_DIR])), shlex.quote(code))
+        cmd = "%s bash -c %s" % (prefix, shlex.quote(exports + "python3 -c " + shlex.quote(code)))
         try:
             p = subprocess.run(cmd.strip(), shell=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, universal_newlines=True, timeout=600)
@@ -523,6 +527,9 @@ def _check_image(site, s, report, variables=None):
             _IMAGE_CHECKED[key] = (False, "timed out after 600 s")
     good, last = _IMAGE_CHECKED[key]
     what = "container starts, imports %s" % ", ".join(mods[1:] or ["worker"])
+    if env:
+        what += " (with %s)" % ", ".join("%s=%s" % (k, v if len(str(v)) < 20 else "...")
+                                         for k, v in sorted(env.items()))
     report(good, what, last if good else last[:300])
 
 

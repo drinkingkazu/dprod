@@ -31,6 +31,8 @@ env:
     PATH: /sdf/group/neutrino/kterao/sw/doraemon/src/edep-sim/install/bin:/sdf/group/neutrino/kterao/sw/doraemon/src/DLPGenerator/bin:$PATH
     LD_LIBRARY_PATH: /sdf/group/neutrino/kterao/sw/doraemon/src/edep-sim/install/lib:/sdf/group/neutrino/kterao/sw/doraemon/src/DLPGenerator/build/lib:$LD_LIBRARY_PATH
   all:
+    # production must not depend on ~/.local (pip install --user): everything a stage
+    # imports comes from the image or from checkouts given in `vars` (recorded in provenance)
     PYTHONNOUSERSITE: "1"
 
 slurm:

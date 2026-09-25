@@ -268,6 +268,12 @@ def check(outdir, report):
                                                        "(dirty)" if v.get("git_dirty") is True else ""))
                 if sw:
                     msgs.append("software " + " ".join(sorted(set(sw))))
+                own = task_blocks(prov, name)
+                ci = (own[0].get("container") or {}) if own else {}
+                if ci.get("path"):
+                    msgs.append("image %s (built %s, %s)" % (
+                        os.path.basename(ci["path"]), ci.get("build_date", "?"),
+                        "sha " + ci["head_tail_sha256"][:12] if ci.get("head_tail_sha256") else ci.get("runtime")))
             size = os.path.getsize(path) / 1e6
             lines.append("    %-9s %-44s %8.1f MB  %s" % (f["role"], os.path.basename(path), size,
                                                           "; ".join(msgs)))
