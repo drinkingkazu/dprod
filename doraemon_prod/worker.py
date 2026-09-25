@@ -243,7 +243,13 @@ def run_command(m, task, work, env):
     if extra_pp:     # e.g. the pysupera checkout named in the site config runs, not another one
         env = dict(env, PYTHONPATH=":".join(extra_pp + [x for x in [env.get("PYTHONPATH", "")] if x]))
     with open(os.path.join(work, "command.sh"), "w") as f:
-        f.write(("export PYTHONPATH=%s\n" % shlex.quote(env["PYTHONPATH"]) if extra_pp else "") + cmd + "\n")
+        # the environment the site/stage configs set, so the log shows what the command saw
+        f.write("# environment set by the site/stage config:\n")
+        for k in sorted(m.get("env") or {}):
+            f.write("export %s=%s\n" % (k, shlex.quote(env.get(k, ""))))
+        if extra_pp:
+            f.write("export PYTHONPATH=%s\n" % shlex.quote(env["PYTHONPATH"]))
+        f.write(cmd + "\n")
     logfile = os.path.join(work, "%s.log" % m["stage"])
     rc = run_logged(cmd, logfile, env, work, shell=True)
     if rc != 0:
