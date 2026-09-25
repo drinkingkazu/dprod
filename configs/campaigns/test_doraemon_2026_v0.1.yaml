@@ -35,7 +35,7 @@ stages:
   jaxtpc_wire:
     alias: 2A
     parent: edepsim
-    merge: 5
+    merge: 2
     image: stage23
     profile: gpu
     command: >-
@@ -66,7 +66,7 @@ stages:
   jaxtpc_pixel:
     alias: 2B
     parent: edepsim
-    merge: 5
+    merge: 2
     image: stage23
     profile: gpu
     command: >-
