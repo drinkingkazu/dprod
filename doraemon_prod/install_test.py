@@ -77,6 +77,10 @@ def run(a):
     raw["campaign"] = tag
     raw["max_attempts"] = 1
     groups = {"1": a.image1, "2": a.image2, "3": a.image3}
+    if raw.get("inherit"):
+        raise SystemExit("%s inherits stages from campaign %s; the installation test needs a config "
+                         "that defines every stage (e.g. the source campaign's)" % (
+                             a.config, raw["inherit"].get("campaign")))
     cfg0 = C.normalize_campaign(raw, a.config)
     want = [C.resolve_stage(cfg0, x) for x in a.stages.split(",")]
     for name, s in raw["stages"].items():
@@ -131,7 +135,10 @@ def run(a):
         if results[name] != "done":
             for r in rows:
                 if r["note"]:
-                    _say("  task %d: %s" % (r["task_id"], r["note"].splitlines()[0]))
+                    note = [ln for ln in r["note"].splitlines() if ln.strip()]
+                    _say("  task %d: %s" % (r["task_id"], note[0]))
+                    for ln in note[1:12]:
+                        print("      | " + ln)
 
     # ---- organize per stage
     for name in order:
@@ -151,7 +158,10 @@ def run(a):
                 tgz = os.path.join(c.dir, L.logs_rel_path(name, tname, att))
                 if os.path.exists(tgz):
                     with tarfile.open(tgz) as tf:
-                        tf.extractall(os.path.join(d, "logs"))
+                        try:        # python >= 3.12 (and patched 3.9+): safe extraction filter
+                            tf.extractall(os.path.join(d, "logs"), filter="data")
+                        except TypeError:
+                            tf.extractall(os.path.join(d, "logs"))
             for log in glob.glob(os.path.join(site["log_root"], tag, name, "*.out")):
                 shutil.copy(log, os.path.join(d, "slurm.log"))
 
@@ -174,7 +184,10 @@ def run(a):
                 "%.0f" % at["avg_rss_mb"] if at["avg_rss_mb"] else "-",
                 "%.0f" % at["max_rss_mb"] if at["max_rss_mb"] else "-", gpu))
             if at["reason"]:
-                lines.append("       reason: " + at["reason"].splitlines()[0])
+                # the reason carries the tail of the command's log: show it, it says why
+                rl = [ln for ln in at["reason"].splitlines() if ln.strip()]
+                lines.append("       reason: " + rl[0])
+                lines.extend("         | " + ln for ln in rl[1:25])
     lines.append("")
     report = os.path.join(outdir, "REPORT.txt")
     with open(report, "w") as f:
@@ -270,7 +283,7 @@ def main(argv=None):
     ap.add_argument("--check", metavar="OUTDIR", help=argparse.SUPPRESS)
     ap.add_argument("--report", help=argparse.SUPPRESS)
     ap.add_argument("--site", default=os.environ.get("DPROD_SITE"),
-                    help="site name or path (paths, env, images, container runtime)")
+                    help="site name or path (default: the current / detected site, see `dprod sites`)")
     ap.add_argument("--config", default=os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "configs", "campaigns", "test_doraemon_2026_v0.1.yaml"),
@@ -291,7 +304,11 @@ def main(argv=None):
     if a.check:
         return check(a.check, a.report)
     if not a.site:
-        ap.error("--site is required")
+        from .select import SelectError, pick_site
+        try:
+            a.site = pick_site(None, note=lambda m: print("dprod-install-test: " + m))
+        except SelectError as e:
+            ap.error(str(e))
     return run(a)
 
 

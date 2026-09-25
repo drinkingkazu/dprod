@@ -36,11 +36,21 @@ resubmitted until `max_attempts`, or it can be marked `abandoned` so downstream 
 
 ## Usage
 
+You don't need to set any environment variables. Commands act on the **current campaign**, which is the one you last
+created (`init`), switched to (`use`) or picked from a menu. It's remembered in `~/.config/dprod/state.json`, and
+each command prints a note when it uses it. If there's none, you get a numbered menu of the site's campaigns.
+`--site`/`--campaign` (or `DPROD_SITE`/`DPROD_CAMPAIGN`) override it for one command, without changing it, so
+scrontab rounds that name their campaigns never switch yours. The site defaults to the one whose storage path
+exists on this machine (s3df on sdfiana).
+
 The controller runs on a login node: python3 (≥ 3.6) + PyYAML, plus `sbatch`/`sacct`.
 
 ```bash
-bin/dprod --site s3df init configs/campaigns/test_doraemon_2026_v0.1.yaml
-export DPROD_SITE=s3df DPROD_CAMPAIGN=test_doraemon_2026_v0.1
+bin/dprod init                  # asks: site, campaign config (shows the tag it contains), confirm
+bin/dprod sites                 # site configs; which one is usable on this machine
+bin/dprod configs               # campaign configs and the campaign tag in each
+bin/dprod campaigns             # existing campaigns at the site with progress; * = current
+bin/dprod use [<tag>]           # switch the current campaign (menu without a tag)
 
 dprod submit 1 --limit 300      # split into arrays of <=100 (S3DF limit)
 dprod status                    # sync + table: queued/running/done/failed, events, wall time
@@ -138,9 +148,21 @@ Both views show:
 Served over http(s), an open page re-fetches both JSON files every minute or two and redraws in place.
 Opened as a local file, it shows the snapshot embedded by whoever wrote it last.
 
-To look at it before a web server is set up, serve the directory from sdfiana and tunnel to it:
+**Several campaigns.** Every campaign page registers itself in `<web base>/campaigns.json`. The
+controller does this, and so do the jobs for the job-records view. `<web base>/index.html` is an
+**All campaigns** overview: each campaign with its events, per-stage progress bars and failures, most recent first.
+Every campaign page has a **Campaign** drop-down and an **All campaigns** link. `dprod destroy` removes the campaign
+from the list. The links are relative, so they work under any web server. The web base is:
+
+| `web.dir` in the site config | campaign pages | web base (overview, campaigns.json) |
+|---|---|---|
+| not set (default) | `<storage_root>/<campaign>/web/` | `<storage_root>/` |
+| `/some/path/{campaign}` | `/some/path/<campaign>/` | `/some/path/` |
+| `/some/path` (no `{campaign}`) | `/some/path/<campaign>/` | `/some/path/` |
+
+To look at it before a web server is set up, serve the web base from sdfiana and tunnel to it:
 ```bash
-cd <web dir> && python3 -m http.server 8765                     # on sdfiana
+cd <web base> && python3 -m http.server 8765                    # on sdfiana
 ssh -L 8765:localhost:8765 <user>@<the same sdfiana node>        # on your laptop; open http://localhost:8765/
 ```
 
@@ -156,6 +178,34 @@ web:
 For the job-side view, `web.dir` must be a directory that the **compute nodes can write** and a web
 server serves. `publish` runs only from the controller, so with a remote copy the job-side updates
 would not reach the web server.
+
+## Re-processing another campaign's output (derived campaigns)
+
+To re-run later stages on an existing campaign's output, for example stage 3 after a pysupera update, create
+a campaign that **inherits** the earlier stages:
+```yaml
+campaign: prod_doraemon_2026_v0.0_supera2
+inherit:
+  campaign: prod_doraemon_2026_v0.0        # same site
+  stages: [jaxtpc_wire, jaxtpc_pixel]      # their ancestors (edepsim) come along
+stages:
+  supera_wire:  {alias: 3A, parent: jaxtpc_wire, ...}    # the stages to run here
+  supera_pixel: {alias: 3B, parent: jaxtpc_pixel, ...}
+```
+`configs/campaigns/example_derived_supera.yaml` is a complete example; start it with `dprod init`.
+* **Read-only inheritance:** the inherited stages' definitions are resolved from the source campaign at `init`. Their
+  tasks, files and (job, event) records are imported from its bookkeeping, pointing at its files; nothing is
+  copied. They can't be submitted, extended or marked here, and `status` marks them with `*`.
+* **Following the source:** every sync imports what the source has finished since, so a derived campaign can run
+  while the source is still producing. Its own tasks become ready as the source's parent tasks finish. The source
+  must be synced itself (its `watch`/cron does that).
+* **Provenance and lookup:** outputs keep the full provenance chain (e.g. `edepsim -> jaxtpc_wire -> supera_wire`),
+  with the derived campaign's config current and the source's under `campaign_config_history`. `lookup` finds the
+  source's files and the new ones.
+* **Destroy:** `dprod destroy` of a derived campaign deletes only its own files, never the source's.
+
+The alternative is to stay within one campaign: add a stage (e.g. `supera_wire_v2` with parent `jaxtpc_wire`) with
+`dprod update-config`.
 
 ## Destroying a campaign
 
@@ -317,8 +367,7 @@ dprod submit 1 --partition roma --account neutrino:other   # or: dprod advance /
    ```
 5. **Smoke test** (4 jobs × 5 events, stage 2 merges 2 jobs per task):
    ```bash
-   bin/dprod --site s3df init configs/campaigns/test_doraemon_2026_smoke_v0.0.yaml
-   export DPROD_SITE=s3df DPROD_CAMPAIGN=test_doraemon_2026_smoke_v0.0
+   bin/dprod init                    # choose s3df and the smoke config; it becomes the current campaign
    bin/dprod submit 1 --dry-run      # look at the generated sbatch script first
    bin/dprod submit 1
    bin/dprod status                  # squeue -u $USER also works

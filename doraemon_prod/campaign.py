@@ -51,7 +51,7 @@ def _snapshot_code(cdir):
 
 def _snapshot_inputs(cdir, cfg, src_base):
     for s in cfg["stages"].values():
-        if not s["input_dir"]:
+        if not s["input_dir"] or s.get("external"):
             continue
         src = s["input_dir"]
         if not os.path.isabs(src):
@@ -77,7 +77,7 @@ class Campaign:
         cfg_path = os.path.join(self.dir, "campaign.yaml")
         if not os.path.exists(cfg_path):
             raise CampaignError("campaign %s is not initialized at %s" % (tag, self.dir))
-        self.cfg = C.load_campaign(cfg_path)
+        self.cfg = C.load_campaign(cfg_path, site)
         self.db_path = _db_path(site, self.dir, tag)
         self.con = D.connect(self.db_path)
         self.sched = get_scheduler(site, self.dir)
@@ -135,26 +135,40 @@ class Campaign:
     # ------------------------------------------------------------------ init
     @classmethod
     def init(cls, site, cfg_path):
-        cfg = C.load_campaign(cfg_path)
+        raw = C.load_yaml(cfg_path)
+        if C.needs_materialize(raw):
+            raw = C.materialize_inherit(raw, site, source=cfg_path)
+        cfg = C.normalize_campaign(raw, source=cfg_path)
         tag = cfg["campaign"]
         cdir = campaign_dir(site, tag)
         if os.path.exists(os.path.join(cdir, "campaign.yaml")):
             raise CampaignError("campaign %s already exists at %s" % (tag, cdir))
         for s in cfg["stages"].values():
-            if s["enabled"]:               # validate site/stage compatibility early
+            if s["enabled"] and not s["external"]:   # validate site/stage compatibility early
                 C.slurm_options(site, s)
                 C.container_prefix(site, s)
         os.makedirs(cdir, exist_ok=True)
         _snapshot_inputs(cdir, cfg, C.REPO_DIR)
         _snapshot_code(cdir)
-        shutil.copyfile(cfg_path, os.path.join(cdir, "campaign.yaml"))
+        if raw.get("inherit"):              # frozen config: inherited stages resolved
+            import yaml
+            with open(os.path.join(cdir, "campaign.yaml"), "w") as f:
+                f.write("# Frozen by `dprod init` from %s; stages marked external are inherited\n"
+                        "# (read-only) from campaign %s.\n" % (os.path.abspath(cfg_path),
+                                                              raw["inherit"]["campaign"]))
+                yaml.safe_dump(raw, f, sort_keys=False, default_flow_style=False)
+        else:
+            shutil.copyfile(cfg_path, os.path.join(cdir, "campaign.yaml"))
         dbp = _db_path(site, cdir, tag)
         con = D.create(dbp, {"campaign": tag, "site": site["name"], "created": D.now(),
                              "config_source": os.path.abspath(cfg_path)})
         con.close()
         c = cls(site, tag)
         root = c.cfg["stages"][c.cfg["root_stage"]]
-        c.extend(int(root["n_jobs"]))
+        if root["external"]:
+            c.sync_external()                  # import the source's tasks, define ours
+        else:
+            c.extend(int(root["n_jobs"]))
         from .webdata import write_plan
         write_plan(c)
         return c
@@ -162,6 +176,10 @@ class Campaign:
     def extend(self, n_jobs):
         """Grow the root stage to n_jobs jobs, then define downstream tasks."""
         root = self.cfg["root_stage"]
+        if self.cfg["stages"][root]["external"]:
+            raise CampaignError("the jobs of this campaign come from campaign %s; extend that one "
+                                "(new jobs are picked up here automatically)"
+                                % self.cfg["stages"][root]["external"])
         cur = self.con.execute("SELECT COUNT(*) FROM tasks WHERE stage = ?", (root,)).fetchone()[0]
         if n_jobs < cur:
             raise CampaignError("campaign already has %d jobs" % cur)
@@ -197,7 +215,7 @@ class Campaign:
     def update_config(self, path, dry_run=False, out=print):
         """Replace the frozen campaign config with `path`, refusing changes that would
         break what already ran. Returns the list of changes."""
-        new = C.load_campaign(path)
+        new = C.load_campaign(path, self.site)
         cur = self.cfg
         if new["campaign"] != self.tag:
             raise CampaignError("config is for campaign %r, not %r" % (new["campaign"], self.tag))
@@ -226,6 +244,10 @@ class Campaign:
             return outd
 
         for st, ns in new["stages"].items():
+            if ns["external"] or (cur["stages"].get(st) or {}).get("external"):
+                if (cur["stages"].get(st) or {}).get("external") != ns["external"]:
+                    errors.append("%s: inherited stages cannot be added or changed" % st)
+                continue                     # definitions come from the source campaign
             if st not in cur["stages"]:
                 if ns["parent"] not in cur["stages"] and ns["parent"] not in new["stages"]:
                     errors.append("new stage %s: unknown parent %s" % (st, ns["parent"]))
@@ -259,8 +281,15 @@ class Campaign:
         stamp = time.strftime("%Y%m%d_%H%M%S")
         cfg_file = os.path.join(self.dir, "campaign.yaml")
         shutil.copyfile(cfg_file, cfg_file + "." + stamp)
-        shutil.copyfile(path, cfg_file)
-        self.cfg = C.load_campaign(cfg_file)
+        raw_new = C.load_yaml(path)
+        if C.needs_materialize(raw_new):
+            import yaml
+            raw_new = C.materialize_inherit(raw_new, self.site, source=path)
+            with open(cfg_file, "w") as f:
+                yaml.safe_dump(raw_new, f, sort_keys=False, default_flow_style=False)
+        else:
+            shutil.copyfile(path, cfg_file)
+        self.cfg = C.load_campaign(cfg_file, self.site)
         with self.con:
             # re-define tasks of unrun stages whose grouping changed, and add new stages
             for st, ns in self.cfg["stages"].items():
@@ -304,6 +333,62 @@ class Campaign:
                 return True
             p = cfg["stages"][p]["parent"]
         return False
+
+    def sync_external(self):
+        """Import tasks, files and (job, event) records of inherited stages from their
+        source campaign(s), incrementally (tasks updated since the last import), then
+        define this campaign's downstream tasks on top of them."""
+        ext = [s for s in self.cfg["stages"].values() if s["external"]]
+        if not ext:
+            return 0
+        import sqlite3
+        n = 0
+        by_src = {}
+        for s in ext:
+            by_src.setdefault((s["external"], s["external_dir"]), []).append(s)
+        with self.con:
+            for (tag, src_dir), stages in by_src.items():
+                dbp = _db_path(self.site, src_dir, tag)
+                try:
+                    src = sqlite3.connect("file:%s?mode=ro" % dbp, uri=True, timeout=60)
+                except sqlite3.Error as e:
+                    raise CampaignError("cannot read campaign %s bookkeeping %s: %s" % (tag, dbp, e))
+                src.row_factory = sqlite3.Row
+                try:
+                    for s in stages:
+                        key = "ext_mark:%s" % s["name"]
+                        mark = float(D.get_meta(self.con, key, 0))
+                        new_mark = mark
+                        for t in src.execute("SELECT * FROM tasks WHERE stage = ? AND updated > ?"
+                                             " ORDER BY task_id", (s["name"], mark)):
+                            self.con.execute(
+                                "INSERT OR REPLACE INTO tasks (stage, task_id, first_job, last_job,"
+                                " first_parent, last_parent, status, n_attempts, n_events, note, updated)"
+                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (s["name"], t["task_id"], t["first_job"], t["last_job"], t["first_parent"],
+                                 t["last_parent"], t["status"], t["n_attempts"], t["n_events"],
+                                 "from campaign %s" % tag, D.now()))
+                            files = []
+                            if t["status"] == D.DONE:
+                                for f in src.execute("SELECT * FROM files WHERE stage = ? AND task_id = ?",
+                                                     (s["name"], t["task_id"])).fetchall():
+                                    evs = {}
+                                    for e in src.execute("SELECT job_id, event_id FROM events WHERE file_id = ?",
+                                                         (f["id"],)):
+                                        evs.setdefault(e[0], []).append(e[1])
+                                    path = f["path"] if os.path.isabs(f["path"]) else os.path.join(src_dir, f["path"])
+                                    files.append({"path": path, "role": f["role"], "size": f["size"],
+                                                  "events": evs})
+                            D.replace_task_outputs(self.con, s["name"], t["task_id"], files)
+                            new_mark = max(new_mark, t["updated"] or 0)
+                            n += 1
+                        D.set_meta(self.con, key, new_mark)
+                finally:
+                    src.close()
+            for s in self.cfg["stages"].values():
+                if s["parent"] and not s["external"]:
+                    self._define_downstream(s)
+        return n
 
     def refresh_code(self):
         _snapshot_code(self.dir)
@@ -354,7 +439,8 @@ class Campaign:
                     continue
                 e["inputs"].append(os.path.join(self.dir, f["path"]))
             if ps["handler"] == "command":
-                dirs.append(os.path.join(self.dir, L.data_rel_dir(ps["name"], p["first_job"]),
+                dirs.append(os.path.join(ps["external_dir"] or self.dir,
+                                         L.data_rel_dir(ps["name"], p["first_job"]),
                                          L.task_name(ps["name"], p["first_job"], p["last_job"])))
             else:
                 dirs.extend(os.path.dirname(x) for x in e["inputs"])
@@ -400,6 +486,8 @@ class Campaign:
     def plan(self, stage, recovery=False, task_ids=None, limit=None, force=False, reseed=False):
         """The task entries a submit would send (nothing is submitted)."""
         s = self.cfg["stages"][stage]
+        if s["external"]:
+            raise CampaignError("stage %s comes from campaign %s (read-only here)" % (stage, s["external"]))
         if not s["enabled"]:
             raise CampaignError("stage %s is disabled (enabled: false in the campaign config)" % stage)
         entries = self.candidates(stage, recovery, task_ids, force, reseed)
@@ -411,7 +499,7 @@ class Campaign:
         items = []
         for stage in stages or list(self.cfg["stages"]):
             s = self.cfg["stages"][stage]
-            if not s["enabled"]:
+            if not s["enabled"] or s["external"]:
                 continue
             cap = max_queued if max_queued is not None else s["max_queued"]
             n = 0
@@ -516,7 +604,7 @@ class Campaign:
         """Counts over enabled stages: active attempts, ready-but-unsubmitted, retryable."""
         active = ready = retry = 0
         for stage, s in self.cfg["stages"].items():
-            if not s["enabled"]:
+            if not s["enabled"] or s["external"]:
                 continue
             active += self.n_active(stage)
             ready += len(self.candidates(stage))
@@ -705,6 +793,7 @@ class Campaign:
     def sync(self):
         """Update attempts/tasks from the scheduler and worker summaries."""
         self._fix_legacy_cancellations()
+        self.sync_external()
         rows = self.con.execute(
             "SELECT a.*, s.array_job_id FROM attempts a JOIN submissions s ON s.id = a.submission_id"
             " WHERE a.state IN ('submitted', 'running')").fetchall()
@@ -798,6 +887,9 @@ class Campaign:
         missing = {}
         for stage in stages or list(self.cfg["stages"]):
             s = self.cfg["stages"][stage]
+            if s["external"]:
+                out("%s: from campaign %s (its summary is there), skipped" % (stage, s["external"]))
+                continue
             done = D.tasks(self.con, stage, [D.DONE])
             if not done:
                 out("%s: no done tasks, skipped" % stage)
@@ -911,6 +1003,9 @@ class Campaign:
     def mark(self, stage, task_ids, status, note=None, force=False):
         if status not in (D.ABANDONED, D.FAILED, D.NEW):
             raise CampaignError("can only mark tasks abandoned, failed or new")
+        if self.cfg["stages"][stage]["external"]:
+            raise CampaignError("stage %s comes from campaign %s; mark it there"
+                                % (stage, self.cfg["stages"][stage]["external"]))
         changed = 0
         with self.con:
             for t in D.tasks(self.con, stage, task_ids=task_ids):

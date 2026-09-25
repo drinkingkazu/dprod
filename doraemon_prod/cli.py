@@ -3,8 +3,8 @@
 Run on a login node (needs sbatch/sacct). The campaign is selected with
 --site/--campaign or the DPROD_SITE/DPROD_CAMPAIGN environment variables.
 
-  dprod --site s3df init configs/campaigns/test_doraemon_2026_v0.1.yaml
-  export DPROD_SITE=s3df DPROD_CAMPAIGN=test_doraemon_2026_v0.1
+  dprod init                          # asks: site, campaign config; becomes the current campaign
+  dprod sites | configs | campaigns   # what exists; `dprod use <tag>` switches the current campaign
   dprod submit 1 --limit 200          # stage 1 (alias) or edepsim (name)
   dprod status                        # sync + per-stage summary
   dprod submit 2A                     # downstream: submits whatever inputs are ready
@@ -52,7 +52,7 @@ def parse_ids(text):
 
 
 # commands that only read bookkeeping; everything else holds the campaign lock
-READ_ONLY = ("lookup", "files", "tasks", "watch")
+READ_ONLY = ("lookup", "files", "tasks", "watch", "sites", "configs", "campaigns", "use")
 
 
 def _slurm_override(a):
@@ -80,10 +80,23 @@ def _add_slurm_args(p, what="submissions"):
                    help="any other sbatch option, e.g. --slurm mem=64G --slurm constraint=a100")
 
 
+def _note(msg):
+    print("dprod: %s" % msg, file=sys.stderr)
+
+
 def _open(a):
-    if not a.site or not a.campaign:
-        raise CampaignError("specify --site and --campaign (or DPROD_SITE / DPROD_CAMPAIGN)")
-    c = Campaign(C.load_site(a.site), a.campaign)
+    from . import select as SEL
+    try:
+        site_name = SEL.pick_site(a.site, note=_note)
+        site = C.load_site(site_name)
+        chosen = not a.campaign and not (SEL.load_state().get("campaign") and
+                                         SEL.load_state().get("site") == site["name"])
+        tag = SEL.pick_campaign(site, a.campaign, note=_note)
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    if chosen:                       # picked from the menu: remember it
+        SEL.save_state(site_name, tag)
+    c = Campaign(site, tag)
     if a.cmd not in READ_ONLY:
         # held until the command returns (released in main)
         cm = c.lock()
@@ -102,17 +115,95 @@ def _stages(c, arg):
 
 
 def cmd_init(a):
-    site = C.load_site(a.site) if a.site else None
-    if site is None:
-        raise CampaignError("specify --site")
-    c = Campaign.init(site, a.config)
+    from . import select as SEL
+    try:
+        site_name = SEL.pick_site(a.site, note=_note)
+        site = C.load_site(site_name)
+        cfg_path = a.config
+        if not cfg_path:
+            configs = SEL.list_configs()
+            existing = set(c["tag"] for c in SEL.list_campaigns(site))
+            opts = [(p, "%-42s campaign: %s%s" % (os.path.relpath(p, C.REPO_DIR), tag,
+                                                 "   (already exists)" if tag in existing else ""))
+                    for p, tag, _ in configs]
+            cfg_path = SEL.choose("Campaign config:", opts, what="config file")
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    tag = (C.load_yaml(cfg_path) or {}).get("campaign")
+    target = os.path.join(site["storage_root"], str(tag))
+    print("campaign tag (from the config): %s" % tag)
+    print("site %s -> %s" % (site["name"], target))
+    if os.path.exists(os.path.join(target, "campaign.yaml")):
+        raise CampaignError("campaign %s already exists at %s; change `campaign:` in %s for a new one "
+                            "(or `dprod destroy` the old one)" % (tag, target, cfg_path))
+    if not a.config and not _batch(a):
+        if input("Initialize this campaign? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("not initialized")
+            return
+    c = Campaign.init(site, cfg_path)
+    SEL.save_state(site_name, c.tag)
     print("initialized campaign %s at %s" % (c.tag, c.dir))
     print("  database: %s" % c.db_path)
     for stage in c.cfg["stages"]:
         n = c.con.execute("SELECT COUNT(*) FROM tasks WHERE stage = ?", (stage,)).fetchone()[0]
         print("  %-14s %d task(s) defined" % (stage, n))
-    print("next: export DPROD_SITE=%s DPROD_CAMPAIGN=%s; dprod submit %s" % (
-        site["name"], c.tag, c.cfg["stages"][c.cfg["root_stage"]]["alias"] or c.cfg["root_stage"]))
+    print("this is now your current campaign; next: dprod submit %s" % (
+        c.cfg["stages"][c.cfg["root_stage"]]["alias"] or c.cfg["root_stage"]))
+
+
+def cmd_sites(a):
+    from . import select as SEL
+    cur = SEL.load_state().get("site")
+    for name, path, site, usable in SEL.list_sites():
+        print("%s %-8s %-45s %s" % ("*" if name == cur else " ", name,
+                                    site["storage_root"] if site else "(invalid config)",
+                                    "usable on this machine" if usable else ""))
+    print("(* = current; configs in %s)" % os.path.relpath(C.SITE_DIR, os.getcwd()))
+
+
+def cmd_configs(a):
+    from . import select as SEL
+    for p, tag, desc in SEL.list_configs():
+        print("%-45s campaign: %-32s %s" % (os.path.relpath(p, os.getcwd()), tag, desc[:60]))
+
+
+def cmd_campaigns(a):
+    from . import select as SEL
+    try:
+        site = C.load_site(SEL.pick_site(a.site, note=_note))
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    st = SEL.load_state()
+    camps = SEL.list_campaigns(site)
+    if not camps:
+        print("no campaigns at site %s (%s)" % (site["name"], site["storage_root"]))
+    for c in camps:
+        cur = st.get("campaign") == c["tag"] and st.get("site") == site["name"]
+        print("%s %-34s %s" % ("*" if cur else " ", c["tag"], SEL.progress_text(c)))
+    if camps:
+        print("(* = current; switch with `dprod use <campaign>`)")
+
+
+def cmd_use(a):
+    from . import select as SEL
+    try:
+        site_name = a.site or SEL.pick_site(None, note=_note)
+        site = C.load_site(site_name)
+        if a.tag:
+            tag = a.tag
+        else:
+            camps = SEL.list_campaigns(site)
+            cur = SEL.load_state().get("campaign")
+            tag = SEL.choose("Campaign at site %s:" % site["name"],
+                             [(c["tag"], "%-34s %s" % (c["tag"], SEL.progress_text(c))) for c in camps],
+                             default=cur if cur in [c["tag"] for c in camps] else None,
+                             what="campaign")
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    if not os.path.exists(os.path.join(site["storage_root"], tag, "campaign.yaml")):
+        raise CampaignError("no campaign %s at site %s (see `dprod campaigns`)" % (tag, site["name"]))
+    SEL.save_state(site_name, tag)
+    print("current campaign: %s (site %s)" % (tag, site["name"]))
 
 
 def cmd_extend(a):
@@ -402,17 +493,27 @@ def cmd_merge_summary(a):
 _IMAGE_CHECKED = {}
 
 
-def _check_image(site, s, report):
+def _check_image(site, s, report, variables=None):
     """Start the stage's container here and import what the worker and the stage
-    need (catches unreadable images, missing python3/h5py/jax/pysupera...)."""
+    need (catches unreadable images, missing python3/h5py/jax/pysupera...), with the
+    stage's `pythonpath` first, as in the job."""
     import subprocess
     prefix = C.container_prefix(site, dict(s, container_flags=""), login=True)
     mods = ["doraemon_prod.worker"] + list(s.get("check_imports") or [])
-    code = "import importlib, sys; [importlib.import_module(m) for m in %r]; print(sys.version.split()[0])" % mods
-    key = (prefix, tuple(mods))
+    code = ("import importlib, os, sys; ms = [importlib.import_module(m) for m in %r]; "
+            "print('python ' + sys.version.split()[0] + ''.join('; %%s from %%s' %% (m.__name__, "
+            "os.path.dirname(os.path.dirname(m.__file__))) for m in ms[2:] if getattr(m, '__file__', None)))"
+            % mods)
+    pp = []
+    for p in s.get("pythonpath") or []:
+        try:
+            pp.append(str(p).format(**(variables or {})))
+        except KeyError as e:
+            report(False, "pythonpath %s" % p, "unknown variable %s" % e)
+    key = (prefix, tuple(mods), tuple(pp))
     if key not in _IMAGE_CHECKED:
         cmd = "%s env PYTHONPATH=%s python3 -c %s" % (
-            prefix, shlex.quote(C.REPO_DIR), shlex.quote(code))
+            prefix, shlex.quote(":".join(pp + [C.REPO_DIR])), shlex.quote(code))
         try:
             p = subprocess.run(cmd.strip(), shell=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, universal_newlines=True, timeout=600)
@@ -422,7 +523,7 @@ def _check_image(site, s, report):
             _IMAGE_CHECKED[key] = (False, "timed out after 600 s")
     good, last = _IMAGE_CHECKED[key]
     what = "container starts, imports %s" % ", ".join(mods[1:] or ["worker"])
-    report(good, what, ("python " + last) if good else last[:300])
+    report(good, what, last if good else last[:300])
 
 
 def cmd_check(a):
@@ -460,7 +561,7 @@ def cmd_check(a):
         print("(pass a campaign config to also check images and software paths)")
         return 0 if ok[0] else 1
 
-    cfg = C.load_campaign(a.config)
+    cfg = C.load_campaign(a.config, site)
     cdir = os.path.join(site["storage_root"], cfg["campaign"])
     report(not os.path.exists(os.path.join(cdir, "campaign.yaml")),
            "campaign tag %s unused" % cfg["campaign"],
@@ -507,10 +608,15 @@ def cmd_check(a):
                     paths["provenance %s %s" % (kind, k)] = str(pth).format(**v)
                 except KeyError as e:
                     report(False, "provenance %s %s" % (kind, k), "unknown variable %s" % e)
+        for pth in s.get("pythonpath") or []:
+            try:
+                paths["pythonpath %s" % pth] = str(pth).format(**v)
+            except KeyError:
+                pass
         for what, pth in paths.items():
             report(os.path.exists(pth), what, pth)
-        if not a.no_images and s["enabled"]:
-            _check_image(site, s, report)
+        if not a.no_images and s["enabled"] and not s.get("external"):
+            _check_image(site, s, report, v)
     print("all checks passed" if ok[0] else "SOME CHECKS FAILED")
     return 0 if ok[0] else 1
 
@@ -582,14 +688,27 @@ def build_parser():
     ap = argparse.ArgumentParser(prog="dprod", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--site", default=os.environ.get("DPROD_SITE"),
-                    help="site name (configs/sites/<name>.yaml) or path")
-    ap.add_argument("--campaign", default=os.environ.get("DPROD_CAMPAIGN"), help="campaign tag")
+                    help="site name (configs/sites/<name>.yaml) or path; default: the current one "
+                         "(see `dprod sites`)")
+    ap.add_argument("--campaign", default=os.environ.get("DPROD_CAMPAIGN"),
+                    help="campaign tag; default: the current one (see `dprod campaigns`, `dprod use`)")
     sub = ap.add_subparsers(dest="cmd")
     sub.required = True        # (add_subparsers(required=...) needs python >= 3.7)
 
-    p = sub.add_parser("init", help="create a campaign from a campaign config")
-    p.add_argument("config")
+    p = sub.add_parser("init", help="create a campaign (interactive without arguments)")
+    p.add_argument("config", nargs="?", help="campaign config (default: choose from configs/campaigns)")
+    p.add_argument("--batch", "-y", action="store_true", help="do not ask for confirmation")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("sites", help="list site configs")
+    p.set_defaults(func=cmd_sites)
+    p = sub.add_parser("configs", help="list campaign configs")
+    p.set_defaults(func=cmd_configs)
+    p = sub.add_parser("campaigns", help="list the campaigns of a site")
+    p.set_defaults(func=cmd_campaigns)
+    p = sub.add_parser("use", help="set the current campaign (menu without an argument)")
+    p.add_argument("tag", nargs="?")
+    p.set_defaults(func=cmd_use)
 
     p = sub.add_parser("extend", help="grow the number of stage-1 jobs")
     p.add_argument("n_jobs", type=int, help="new total number of jobs")

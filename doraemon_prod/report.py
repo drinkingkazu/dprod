@@ -71,6 +71,8 @@ def print_status(c, out=print):
         r = stage_summary(c, stage)
         k = r["counts"]
         label = "%s[%s]" % (stage, r["alias"]) if r["alias"] else stage
+        if c.cfg["stages"][stage].get("external"):
+            label += "*"
         out("%-18s %6d %11s %6d %7d %6d %11s %5d %10d %8s %13s %16s  %s/%s/%s" % (
             label, r["total"], "%d(%d)" % (k[D.NEW], r["ready"]), r["queued"], r["running"],
             k[D.DONE], "%d(%d)" % (k[D.FAILED], r["retry"]), k[D.ABANDONED], r["events"],
@@ -79,6 +81,9 @@ def print_status(c, out=print):
             "%s/%s" % ("%.0f%%" % r["gpu_util_pct"], _fmt_mb(r["gpu_mem_mb"]))
             if r["gpu_util_pct"] is not None else "-", _fmt_s(r["t_min"]), _fmt_s(r["t_mean"]), _fmt_s(r["t_max"])))
     out("")
+    exts = sorted(set(s["external"] for s in c.cfg["stages"].values() if s.get("external")))
+    if exts:
+        out("*: inherited from campaign %s (read-only here; imported at every sync)" % ", ".join(exts))
     out("new(ready): not yet submitted (of which all inputs are available)")
     out("failed(rtr): latest attempt failed (of which retryable with `dprod recover`)")
     out("RAM avg/max: mean over done jobs of the time-averaged / peak RSS")

@@ -65,8 +65,12 @@ STAGE_DEFAULTS = {
     #   roles: output roles that get it (None = all); files: {name: config file};
     #   software: {name: repository dir or executable}
     "provenance": {"roles": None, "files": {}, "software": {}},
+    "external": None,              # set for stages inherited from another campaign (read-only)
+    "external_dir": None,          # that campaign's directory
     "max_queued": None,
-    "check_imports": ["h5py"],     # python modules `dprod check` imports inside the stage image            # advance/watch: keep at most this many elements queued+running
+    "check_imports": ["h5py"],     # python modules `dprod check` imports inside the stage image
+    "pythonpath": [],              # dirs put first on PYTHONPATH for the stage command (and for
+                                   # `dprod check`), e.g. ["{pysupera_dir}"]; may use {vars}            # advance/watch: keep at most this many elements queued+running
     "monitor_gpu": None,           # sample GPU use; None = auto (slurm options request GPUs)
     "monitor_interval": None,      # seconds between resource samples (default: site, 10)
 }
@@ -119,9 +123,65 @@ def load_site(name_or_path, check_paths=True):
     return site
 
 
-def load_campaign(path):
+def load_campaign(path, site=None):
     cfg = load_yaml(path)
+    if needs_materialize(cfg):
+        if site is None:
+            raise ConfigError("%s inherits stages from campaign %r; a site is needed to resolve them"
+                              % (path, (cfg.get("inherit") or {}).get("campaign")))
+        cfg = materialize_inherit(cfg, site, source=path)
     return normalize_campaign(cfg, source=path)
+
+
+def needs_materialize(raw):
+    inh = raw.get("inherit") or {}
+    if not inh:
+        return False
+    stages = raw.get("stages") or {}
+    return not all((stages.get(n) or {}).get("external") for n in inh.get("stages") or [])
+
+
+def materialize_inherit(raw, site, source="<campaign>"):
+    """Resolve `inherit: {campaign: <tag>, stages: [...]}`: copy those stage definitions
+    (and their ancestors) from the source campaign's frozen config, marked external."""
+    raw = copy.deepcopy(raw)
+    inh = raw.get("inherit") or {}
+    tag = inh.get("campaign")
+    if not tag or not inh.get("stages"):
+        raise ConfigError("%s: inherit needs 'campaign' and 'stages'" % source)
+    src_dir = os.path.join(site["storage_root"], tag)
+    src_cfg = os.path.join(src_dir, "campaign.yaml")
+    if not os.path.exists(src_cfg):
+        raise ConfigError("%s: inherited campaign %s not found at %s" % (source, tag, src_dir))
+    src = load_yaml(src_cfg)
+    src_stages = src.get("stages") or {}
+    want, todo = [], list(inh["stages"])
+    while todo:
+        n = todo.pop()
+        if n not in src_stages:
+            raise ConfigError("%s: campaign %s has no stage %r (it has: %s)" % (
+                source, tag, n, ", ".join(src_stages)))
+        if n not in want:
+            want.append(n)
+            if src_stages[n].get("parent"):
+                todo.append(src_stages[n]["parent"])
+    own = raw.get("stages") or {}
+    clash = [n for n in want if n in own and not (own[n] or {}).get("external")]
+    if clash:
+        raise ConfigError("%s: stage(s) %s are inherited from %s and cannot be redefined; "
+                          "give the new stage another name" % (source, ", ".join(clash), tag))
+    merged = {}
+    for n in src_stages:                       # keep the source's stage order
+        if n in want:
+            st = copy.deepcopy(src_stages[n])
+            st["external"] = st.get("external") or tag       # a chain keeps the original owner
+            st["external_dir"] = st.get("external_dir") or src_dir
+            merged[n] = st
+    for n, st in own.items():
+        if n not in merged:
+            merged[n] = st
+    raw["stages"] = merged
+    return raw
 
 
 def normalize_campaign(cfg, source="<campaign>"):
