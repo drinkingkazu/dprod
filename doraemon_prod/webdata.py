@@ -68,7 +68,7 @@ def _downsample(points, n=400):
 
 def stage_stats(done):
     """Statistics over successful attempts: dicts with t (end), wall, events,
-    max_rss, avg_rss, gpu_util, gpu_mem."""
+    bytes (output size), max_rss, avg_rss, gpu_util, gpu_mem."""
     walls = sorted(r["wall"] for r in done if r.get("wall") is not None)
     cum, total = [], 0
     for r in sorted((r for r in done if r.get("t")), key=lambda r: r["t"]):
@@ -78,6 +78,11 @@ def stage_stats(done):
     def avg(key):
         vals = [r[key] for r in done if r.get(key) is not None]
         return sum(vals) / len(vals) if vals else None
+
+    def dist(key):
+        """distribution of a per-task quantity: {hist, avg, n}"""
+        vals = [r[key] for r in done if r.get(key) is not None]
+        return {"hist": _histogram(vals), "avg": sum(vals) / len(vals) if vals else None, "n": len(vals)}
 
     return {
         "events": sum(r.get("events") or 0 for r in done),
@@ -89,6 +94,11 @@ def stage_stats(done):
         "ram_max": max((r["max_rss"] for r in done if r.get("max_rss")), default=None),
         "gpu_util": avg("gpu_util"), "gpu_mem": avg("gpu_mem"),
         "cumulative": _downsample(cum),
+        # per-task distributions for the histogram panels
+        "dists": {"wall": {"hist": _histogram(walls), "avg": sum(walls) / len(walls) if walls else None,
+                           "n": len(walls)},
+                  "bytes": dist("bytes"), "max_rss": dist("max_rss"),
+                  "gpu_mem": dist("gpu_mem"), "gpu_util": dist("gpu_util")},
     }
 
 
@@ -245,6 +255,7 @@ def from_records(campaign_dir, now=None):
         counts["new"] = max(0, ps["tasks"] - sum(counts.values()))
         done = [r for (st, _), r in latest.items() if st == name and r["state"] == "done"]
         stats = stage_stats([{"t": r.get("end"), "wall": r.get("wall"), "events": r.get("events"),
+                              "bytes": r.get("bytes"),
                               "max_rss": r.get("max_rss"), "avg_rss": r.get("avg_rss"),
                               "gpu_util": r.get("gpu_util"), "gpu_mem": r.get("gpu_mem")}
                              for r in done])
