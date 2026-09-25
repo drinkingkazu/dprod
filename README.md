@@ -61,6 +61,7 @@ dprod cancel 2A --queued        # scancel queued elements; their tasks go back t
 dprod move 2A --partition P --account A   # re-route queued elements in place (scontrol update)
 dprod check <campaign.yaml>     # preflight: tools, paths, images, software (before init)
 dprod update-config <new.yaml>  # change a running campaign's config (checked against what ran)
+dprod destroy                   # cancel all jobs, delete all files of the campaign (asks for the tag)
 ```
 
 ### Keeping all stages moving: `advance` and `watch`
@@ -121,6 +122,12 @@ Both views show:
 Served over http(s), an open page re-fetches both JSON files every minute or two and redraws in place.
 Opened as a local file, it shows the snapshot embedded by whoever wrote it last.
 
+To look at it before a web server is set up, serve the directory from sdfiana and tunnel to it:
+```bash
+cd <web dir> && python3 -m http.server 8765                     # on sdfiana
+ssh -L 8765:localhost:8765 <user>@<the same sdfiana node>        # on your laptop; open http://localhost:8765/
+```
+
 Setup in the site config:
 ```yaml
 web:
@@ -133,6 +140,24 @@ web:
 For the job-side view, `web.dir` must be a directory that the **compute nodes can write** and a web
 server serves. `publish` runs only from the controller, so with a remote copy the job-side updates
 would not reach the web server.
+
+## Destroying a campaign
+
+```bash
+bin/dprod destroy --dry-run            # what would be deleted (paths, sizes) and active jobs
+bin/dprod destroy                      # asks you to type the campaign tag
+bin/dprod destroy --confirm <tag>      # non-interactive
+```
+It cancels the campaign's queued and running jobs first and waits until they have stopped, so dying jobs don't write
+files back. Then it deletes:
+* the campaign directory: data, database, summaries, logs, records, code and inputs snapshots, and the default web page;
+* the campaign's slurm log directory;
+* a separate web directory, but only if its path contains the campaign tag (`web.dir: .../{campaign}`).
+  A shared web directory is kept.
+
+Each path is checked to belong to that campaign before anything is removed. Tags starting with `prod_` also need
+`--allow-production`. Remove the campaign from your scrontab entry too; `destroy` reminds you if it's listed there.
+After a destroy, the tag can be initialized again.
 
 ## Installation test (`bin/dprod-install-test`)
 

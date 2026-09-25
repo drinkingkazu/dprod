@@ -22,6 +22,7 @@ Run on a login node (needs sbatch/sacct). The campaign is selected with
 import argparse
 import os
 import shlex
+import subprocess
 import sys
 import time
 
@@ -462,6 +463,47 @@ def cmd_check(a):
     return 0 if ok[0] else 1
 
 
+def _human(n):
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1000 or u == "PB":
+            return ("%.0f %s" if u == "B" else "%.1f %s") % (n, u)
+        n /= 1000.0
+
+
+def cmd_destroy(a):
+    c = _open(a)
+    if c.tag.startswith("prod_") and not a.allow_production:
+        raise CampaignError("%s is a production tag; add --allow-production to destroy it" % c.tag)
+    plan, active = c.destroy_plan()
+    print("destroy campaign %s (site %s) -- this deletes, it cannot be undone:" % (c.tag, c.site["name"]))
+    for p, size in plan:
+        print("  %10s  %s" % (_human(size), p))
+    print("  %d queued/running array element(s) will be cancelled first" % len(active))
+    try:
+        crontab = subprocess.run(["scrontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 universal_newlines=True, timeout=30).stdout
+        if c.tag in crontab:
+            print("  note: your scrontab still mentions %s; remove that entry (scrontab -e)" % c.tag)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if a.dry_run:
+        print("[dry-run] nothing deleted")
+        return
+    if a.confirm is None:
+        if not sys.stdin.isatty():
+            raise CampaignError("not a terminal: pass --confirm %s to destroy non-interactively" % c.tag)
+        a.confirm = input("type the campaign tag to confirm: ").strip()
+    if a.confirm != c.tag:
+        raise CampaignError("confirmation %r does not match %r; nothing deleted" % (a.confirm, c.tag))
+    removed = c.destroy()
+    for p, size, errors in removed:
+        print("removed %s (%s)%s" % (p, _human(size),
+                                     "; %d path(s) could not be removed, e.g. %s" % (len(errors), errors[0])
+                                     if errors else ""))
+    _HELD_LOCKS[:] = [(cc, cm) for cc, cm in _HELD_LOCKS if cc is not c]   # campaign is gone
+    print("campaign %s destroyed" % c.tag)
+
+
 def cmd_update_config(a):
     c = _open(a)
     changes = c.update_config(a.config, dry_run=a.dry_run)
@@ -622,6 +664,13 @@ def build_parser():
     p.add_argument("--rebuild", action="store_true",
                    help="rewrite the stage-1 merged file from scratch")
     p.set_defaults(func=cmd_merge_summary)
+
+    p = sub.add_parser("destroy", help="cancel all jobs of a campaign and delete all its files")
+    p.add_argument("--confirm", metavar="TAG", help="the campaign tag, to confirm without a prompt")
+    p.add_argument("--dry-run", action="store_true", help="only show what would be deleted")
+    p.add_argument("--allow-production", action="store_true",
+                   help="required for tags starting with prod_")
+    p.set_defaults(func=cmd_destroy)
 
     p = sub.add_parser("update-config",
                        help="replace the campaign's frozen config (checked against what already ran)")

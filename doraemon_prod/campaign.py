@@ -767,6 +767,73 @@ class Campaign:
                 raise CampaignError("summary merge failed (exit %d): %s" % (rc, cmd))
         return missing
 
+    # ------------------------------------------------------------------ destroy
+    def destroy_plan(self):
+        """Paths `destroy` would remove: [(path, bytes)], plus the active attempts."""
+        from .web import web_dir
+        paths = [self.dir, os.path.join(self.site["log_root"], self.tag)]
+        wd = web_dir(self)
+        if not os.path.realpath(wd).startswith(os.path.realpath(self.dir) + os.sep) and \
+                self.tag in os.path.realpath(wd).split(os.sep):
+            paths.append(wd)          # a separate, campaign-specific web directory
+        if self.site.get("db_path"):
+            paths.append(self.db_path)
+        out = []
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            size = 0
+            if os.path.isdir(p):
+                for root, _, files in os.walk(p):
+                    for fn in files:
+                        try:
+                            size += os.lstat(os.path.join(root, fn)).st_size
+                        except OSError:
+                            pass
+            else:
+                size = os.path.getsize(p)
+            out.append((p, size))
+        self.sync()
+        return out, self._selected_active(None, None, queued_only=False)
+
+    def destroy(self, wait_s=180, out=print):
+        """Cancel the campaign's jobs and delete its directories (see destroy_plan)."""
+        storage = os.path.realpath(self.site["storage_root"])
+        cdir = os.path.realpath(self.dir)
+        # identity checks: never remove anything that is not this campaign's
+        if os.path.dirname(cdir) != storage or os.path.basename(cdir) != self.tag or \
+                not os.path.exists(os.path.join(cdir, "campaign.yaml")):
+            raise CampaignError("refusing: %s does not look like campaign %s" % (cdir, self.tag))
+        plan, active = self.destroy_plan()
+        if active:
+            out("cancelling %d queued/running element(s) ..." % len(active))
+            self.cancel()
+            t0 = time.time()
+            while time.time() - t0 < wait_s:
+                self.sync()
+                left = self._selected_active(None, None, queued_only=False)
+                if not left:
+                    break
+                time.sleep(10)
+            else:
+                out("warning: %d element(s) still active after %d s; deleting anyway" % (
+                    len(left), wait_s))
+        self.con.close()
+        removed = []
+        for p, size in plan:
+            rp = os.path.realpath(p)
+            if rp in ("/", storage, os.path.realpath(self.site["log_root"])) or \
+                    self.tag not in rp.split(os.sep) and rp != os.path.realpath(self.db_path):
+                out("skipped (not campaign-specific): %s" % p)
+                continue
+            errors = []
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, onerror=lambda f, path, e: errors.append(path))
+            else:
+                os.remove(p)
+            removed.append((p, size, errors))
+        return removed
+
     # ------------------------------------------------------------------ manual marks
     def mark(self, stage, task_ids, status, note=None, force=False):
         if status not in (D.ABANDONED, D.FAILED, D.NEW):
