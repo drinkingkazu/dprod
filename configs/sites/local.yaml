@@ -32,4 +32,5 @@ slurm:
   default: {}
   profiles:
     cpu: {}
+    cron: {}
     gpu: {}

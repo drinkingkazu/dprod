@@ -9,6 +9,16 @@
 # Options after `--` are added, e.g. `-- --max-queued 300 --partition roma`.
 # Rounds that overlap wait for the campaign lock; they never double-submit.
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Without scrontab: a self-resubmitting chain of round jobs (see doraemon_prod/loop.py)
+#   dprod-cron --loop 15m --site s3df CAMPAIGN [...] [-- watch options]
+#   dprod-cron --status | --stop  [--name NAME] --site s3df
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  case "$arg" in
+    --loop|--loop=*|--stop|--status)
+      exec env PYTHONPATH="${HERE}${PYTHONPATH:+:$PYTHONPATH}" python3 -m doraemon_prod.loop "$@" ;;
+  esac
+done
 SITE=""; CAMPAIGNS=(); EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -25,7 +35,7 @@ fi
 rc=0
 for C in "${CAMPAIGNS[@]}"; do
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') $(hostname) campaign $C"
-  "$HERE/bin/dprod" --site "$SITE" --campaign "$C" watch --once --recover --web --merge-summary "${EXTRA[@]}" || rc=$?
+  PYTHONUNBUFFERED=1 "$HERE/bin/dprod" --site "$SITE" --campaign "$C" watch --once --recover --web --merge-summary "${EXTRA[@]}" || rc=$?
 done
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') done (exit $rc)"
 exit $rc

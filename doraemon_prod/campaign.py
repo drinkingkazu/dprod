@@ -9,6 +9,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import time
 
 from . import config as C
@@ -918,6 +919,7 @@ class Campaign:
                       prefix, shlex.quote(C.REPO_DIR), "merge" if root else "tasks",
                       shlex.quote(lst), shlex.quote(self.merged_summary_path(stage)),
                       self.tag, stage, " --rebuild" if rebuild and root else "")
+            sys.stdout.flush()           # keep log order when stdout is a file (cron rounds)
             rc = subprocess.call(cmd.strip(), shell=True)
             if rc != 0:
                 raise CampaignError("summary merge failed (exit %d): %s" % (rc, cmd))
