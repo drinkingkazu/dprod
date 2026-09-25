@@ -107,6 +107,9 @@ stages:
     profile: cpu
     also_inputs: [edepsim]        # -> {inputs_edepsim}: edep-sim files of the same jobs
     input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
     command: >-
       python3 -m doraemon_prod.stages.supera --readout wire
       --edepsim {inputs_edepsim} --jaxtpc {input_dirs} --outdir {outdir}
@@ -133,6 +136,9 @@ stages:
     profile: cpu
     also_inputs: [edepsim]
     input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
     command: >-
       python3 -m doraemon_prod.stages.supera --readout pixel
       --edepsim {inputs_edepsim} --jaxtpc {input_dirs} --outdir {outdir}

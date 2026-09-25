@@ -137,9 +137,17 @@ def write_plan(c):
             "SELECT task_id FROM tasks WHERE stage = ? AND status = 'abandoned'", (name,))]
         cx = [[r[0], r[1]] for r in con.execute(
             "SELECT task_id, attempt FROM attempts WHERE stage = ? AND state = 'cancelled'", (name,))]
-        stages.append({"name": name, "alias": s["alias"] or name, "parent": s["parent"],
-                       "enabled": s["enabled"], "merge": s["merge"], "tasks": n, "abandoned": ab,
-                       "cancelled": cx})
+        entry = {"name": name, "alias": s["alias"] or name, "parent": s["parent"],
+                 "enabled": s["enabled"], "merge": s["merge"], "tasks": n, "abandoned": ab,
+                 "cancelled": cx, "external": s.get("external")}
+        if s.get("external"):       # no job records here: pass the imported state along
+            entry["counts"] = {r[0]: r[1] for r in con.execute(
+                "SELECT status, COUNT(*) FROM tasks WHERE stage = ? GROUP BY status", (name,))}
+            entry["events"] = con.execute("SELECT COALESCE(SUM(n_events), 0) FROM tasks WHERE stage = ?"
+                                          " AND status = 'done'", (name,)).fetchone()[0]
+            entry["bytes"] = con.execute("SELECT COALESCE(SUM(size), 0) FROM files WHERE stage = ?",
+                                         (name,)).fetchone()[0]
+        stages.append(entry)
     root = c.cfg["root_stage"]
     n_root = stages[0]["tasks"]
     web = c.site.get("web") or {}
@@ -191,6 +199,19 @@ def from_records(campaign_dir, now=None):
     stages, active, failures = [], {}, []
     for ps in plan["stages"]:
         name = ps["name"]
+        if ps.get("external"):
+            counts = {k: 0 for k in STATES}
+            for k, v in (ps.get("counts") or {}).items():
+                counts["submitted" if k == "submitted" else k if k in counts else "new"] += v
+            st = {"name": name, "alias": ps["alias"], "parent": ps["parent"], "enabled": ps["enabled"],
+                  "merge": ps["merge"], "tasks": ps["tasks"], "counts": counts,
+                  "planned_events": plan["planned_events"], "bytes": ps.get("bytes") or 0,
+                  "attempts": 0, "failed_attempts": 0, "external": ps["external"]}
+            st.update(stage_stats([]))
+            st["events"] = ps.get("events") or 0
+            stages.append(st)
+            active[name] = {"queued": 0, "running": 0}
+            continue
         counts = {k: 0 for k in STATES}
         abandoned = set(ps.get("abandoned") or [])
         queued = running = 0

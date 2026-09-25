@@ -21,6 +21,7 @@ if os.path.exists(ROOT):
     shutil.rmtree(ROOT)
 os.makedirs(os.path.join(ROOT, "fail"))
 os.environ["DPROD_LOCAL_ROOT"] = ROOT
+os.environ["DPROD_STATE"] = ""           # do not remember campaigns in ~/.config
 os.environ.pop("DPROD_BATCH", None)
 
 

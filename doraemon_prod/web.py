@@ -54,6 +54,7 @@ def collect(c):
                              (name,)).fetchone()[0]
         stage = {
             "name": name, "alias": s["alias"] or name, "parent": s["parent"],
+            "external": s.get("external"),
             "enabled": s["enabled"], "merge": s["merge"],
             "tasks": sum(counts.values()), "counts": counts,
             "planned_events": planned_events,
@@ -499,6 +500,7 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
       var g = el("g", {class: "stagerow", transform: "translate(0," + (i * rowH + 8) + ")"}, svg);
       var name = el("text", {x: 0, y: barH - 3, class: "name"}, g);
       name.textContent = s.alias + "  " + s.name;
+      if (s.external) { var ex = el("text", {x: 0, y: barH + 13, "font-size": 11}, g); ex.textContent = "from " + s.external; }
       if (!s.enabled) { var dis = el("text", {x: 0, y: barH + 13, "font-size": 11}, g); dis.textContent = "disabled"; }
       var total = Math.max(s.tasks, 1);
       var clipId = "clip" + i;

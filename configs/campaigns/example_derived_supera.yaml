@@ -1,0 +1,75 @@
+# Derived campaign: re-run stage 3 (pysupera) on the stage-2 output of an existing
+# campaign, e.g. after a pysupera update. Stages listed under `inherit` (and their
+# ancestors) are used read-only from that campaign: nothing is copied, its new
+# output is picked up at every sync, and `dprod destroy` of this campaign never
+# touches it. Only the stages below are run here.
+#
+#   dprod init configs/campaigns/example_derived_supera.yaml
+campaign: test_doraemon_2026_v0.1_supera2
+description: >
+  Stage 3A/3B re-run with an updated pysupera on the stage-2 output of test_doraemon_2026_v0.1.
+seed: 20260924
+max_attempts: 3
+
+inherit:
+  campaign: test_doraemon_2026_v0.1     # must exist at the same site
+  stages: [jaxtpc_wire, jaxtpc_pixel]   # their ancestors (edepsim) come along
+
+stages:
+  supera_wire:
+    alias: 3A
+    parent: jaxtpc_wire
+    merge: 1
+    image: stage23
+    profile: cpu
+    also_inputs: [edepsim]        # -> {inputs_edepsim}: edep-sim files of the same jobs
+    input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout wire
+      --edepsim {inputs_edepsim} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    check_imports: [h5py, pysupera]
+    id_reader: pysupera
+    provenance:
+      files:
+        pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
+        pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_wire.yaml"
+      software:
+        pysupera: "{pysupera_dir}"
+    slurm:
+      mem_per_cpu: 8G
+
+  supera_pixel:
+    alias: 3B
+    parent: jaxtpc_pixel
+    merge: 1
+    image: stage23
+    profile: cpu
+    also_inputs: [edepsim]
+    input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout pixel
+      --edepsim {inputs_edepsim} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    check_imports: [h5py, pysupera]
+    id_reader: pysupera
+    provenance:
+      files:
+        pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
+        pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_pixel.yaml"
+      software:
+        pysupera: "{pysupera_dir}"
+    slurm:
+      mem_per_cpu: 8G

@@ -239,8 +239,11 @@ def run_command(m, task, work, env):
     os.makedirs(outdir)
     fmt = template_vars(m, task, work, outdir)
     cmd = sc["command"].format_map(fmt)
+    extra_pp = [str(p).format_map(fmt) for p in (sc.get("pythonpath") or [])]
+    if extra_pp:     # e.g. the pysupera checkout named in the site config runs, not another one
+        env = dict(env, PYTHONPATH=":".join(extra_pp + [x for x in [env.get("PYTHONPATH", "")] if x]))
     with open(os.path.join(work, "command.sh"), "w") as f:
-        f.write(cmd + "\n")
+        f.write(("export PYTHONPATH=%s\n" % shlex.quote(env["PYTHONPATH"]) if extra_pp else "") + cmd + "\n")
     logfile = os.path.join(work, "%s.log" % m["stage"])
     rc = run_logged(cmd, logfile, env, work, shell=True)
     if rc != 0:
