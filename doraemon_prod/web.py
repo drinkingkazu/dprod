@@ -92,31 +92,78 @@ def collect(c):
     }
 
 
+def _expand(d):
+    return os.path.expanduser(os.path.expandvars(d))
+
+
+def web_base(site, override=None):
+    """Directory holding campaigns.json and the all-campaigns page: the part of
+    web.dir before {campaign}, web.dir itself if it has no {campaign}, or the
+    storage root by default (pages then live in <campaign>/web)."""
+    if override:
+        return os.path.dirname(os.path.abspath(_expand(override)))
+    d = (site.get("web") or {}).get("dir")
+    if not d:
+        return site["storage_root"]
+    d = _expand(d)
+    if "{campaign}" in d:
+        return d.split("{campaign}")[0].rstrip("/") or "/"
+    return d
+
+
 def web_dir(c, override=None):
-    web = c.site.get("web") or {}
-    d = override or web.get("dir") or os.path.join(c.dir, "web")
-    return os.path.expanduser(os.path.expandvars(d.format(campaign=c.tag)))
+    """This campaign's page directory."""
+    if override:
+        return os.path.abspath(_expand(override))
+    d = (c.site.get("web") or {}).get("dir")
+    if not d:
+        return os.path.join(c.dir, "web")
+    d = _expand(d)
+    if "{campaign}" in d:
+        return d.format(campaign=c.tag)
+    return os.path.join(d, c.tag)          # shared web dir: one subdirectory per campaign
 
 
-def write_files(d, data, json_name):
+def _write(path, text):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _embed(template, obj):
+    return template.replace("__DATA__", json.dumps(obj, separators=(",", ":"), default=str)
+                            .replace("</", "<\\/"))
+
+
+def write_files(d, data, json_name, base=None):
     """Write <d>/<json_name> and <d>/index.html (with `data` embedded, for viewing
-    as a local file). Used by the controller (status.json) and by jobs (jobs.json)."""
+    as a local file). Used by the controller (status.json) and by jobs (jobs.json).
+    With `base`, also register the campaign in <base>/campaigns.json and rewrite the
+    all-campaigns page <base>/index.html."""
+    from .webdata import update_registry
     os.makedirs(d, exist_ok=True)
-    blob = json.dumps(data, separators=(",", ":"), default=str)
-    for name, text in ((json_name, blob),
-                       ("index.html", PAGE.replace("__DATA__", blob.replace("</", "<\\/")))):
-        tmp = os.path.join(d, ".%s.tmp.%d" % (name, os.getpid()))
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, os.path.join(d, name))
+    _write(os.path.join(d, json_name), json.dumps(data, separators=(",", ":"), default=str))
+    page = dict(data)
+    if base:
+        reg = update_registry(base, data["campaign"], d, data)
+        page["to_base"] = os.path.relpath(base, d)
+        page["registry"] = list(reg["campaigns"].values())
+        if os.path.realpath(base) != os.path.realpath(d):
+            write_hub(base, reg)
+    _write(os.path.join(d, "index.html"), _embed(PAGE, page))
     return os.path.join(d, "index.html")
+
+
+def write_hub(base, reg):
+    _write(os.path.join(base, "index.html"), _embed(HUB, reg))
 
 
 def write(c, out=None, publish=False, log=print):
     write_plan(c)
     data = collect(c)
     d = web_dir(c, out)
-    path = write_files(d, data, "status.json")
+    path = write_files(d, data, "status.json", base=web_base(c.site, out))
     cmd = (c.site.get("web") or {}).get("publish")
     if publish and cmd:
         cmd = cmd.format(dir=shlex.quote(d), campaign=c.tag)
@@ -170,6 +217,10 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .sub { color: var(--text-secondary); }
 .muted { color: var(--text-muted); }
 .spacer { flex: 1; }
+.campnav { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+.campnav select { font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; }
+.campnav a { color: var(--text-secondary); }
 .seg-ctl { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .seg-ctl button { font: inherit; font-size: 13px; color: var(--text-secondary); background: var(--surface-1);
   border: 0; padding: 4px 10px; cursor: pointer; }
@@ -226,6 +277,11 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
   <header>
     <h1 id="title">DORAEMON production</h1>
     <span class="sub" id="subtitle"></span>
+    <span class="campnav" id="campnav" hidden>
+      <label for="campsel">Campaign</label>
+      <select id="campsel"></select>
+      <a id="alllink" href="#">All campaigns</a>
+    </span>
     <span class="spacer"></span>
     <span class="badge" id="freshness"></span>
     <span class="seg-ctl" id="srcctl" role="group" aria-label="Data source">
@@ -263,8 +319,8 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     <p class="desc">Latest failed attempts, newest first. <span class="muted">dprod failures &lt;stage&gt; -v</span> shows full reasons and log paths.</p>
     <div id="failtable"></div>
   </section>
+  <div id="tip" role="status" aria-live="polite"></div>
 </div>
-<div id="tip" role="status" aria-live="polite"></div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
 (function () {
@@ -657,7 +713,29 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
     });
   }
 
+  var REG = EMB.registry || null;
+  function renderCampaignNav() {
+    var nav = document.getElementById("campnav");
+    if (!REG || !REG.length || EMB.to_base === undefined) { nav.hidden = true; return; }
+    nav.hidden = false;
+    var sel = document.getElementById("campsel");
+    sel.textContent = "";
+    var list = REG.slice().sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
+    list.forEach(function (r) {
+      var o = document.createElement("option");
+      o.value = r.path;
+      o.textContent = r.campaign + (r.site ? "  (" + r.site + ")" : "");
+      if (r.campaign === D.campaign) o.selected = true;
+      sel.appendChild(o);
+    });
+    document.getElementById("alllink").setAttribute("href", EMB.to_base + "/index.html");
+  }
+  document.getElementById("campsel").addEventListener("change", function (e) {
+    location.href = EMB.to_base + "/" + e.target.value + "/index.html";
+  });
+
   function renderAll() {
+    renderCampaignNav();
     renderHeader(); renderKpis(); renderStageBars(); renderCumulative(); renderStats(); renderHists(); renderFailures();
   }
   // theme toggle (remembered per browser)
@@ -687,7 +765,12 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
         .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
         .then(function (d) { SRC[k] = d; })
         .catch(function () {});
-    })).then(function () {
+    }).concat(EMB.to_base === undefined ? [] : [
+      fetch(EMB.to_base + "/campaigns.json?t=" + Date.now(), {cache: "no-store"})
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function (reg) { REG = Object.keys(reg.campaigns || {}).map(function (k) { return reg.campaigns[k]; }); renderCampaignNav(); })
+        .catch(function () {})
+    ])).then(function () {
       var n = pick();
       if (n !== D) { D = n; renderAll(); } else renderHeader();
     });
@@ -706,3 +789,173 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
 </body>
 </html>
 """
+
+
+# All-campaigns overview (<web base>/index.html). Same stylesheet as the campaign page.
+HUB = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DORAEMON production campaigns</title>
+<style>__STYLE__
+.minibar { display: inline-flex; flex-direction: column; gap: 2px; margin-right: 12px; vertical-align: top; }
+td.stages { white-space: nowrap; }
+.minibar .lab { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+td a { color: var(--text-primary); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="viz-root" id="root">
+  <header>
+    <h1>DORAEMON production campaigns</h1>
+    <span class="spacer"></span>
+    <span class="badge" id="freshness"></span>
+    <button class="theme" id="themebtn" type="button">Theme</button>
+  </header>
+  <section class="card">
+    <h2>Campaigns</h2>
+    <p class="desc">Most recently updated first. Stage bars show tasks per stage; select a campaign for details.</p>
+    <div class="legend" id="legend"></div>
+    <div id="table"></div>
+  </section>
+  <div id="tip" role="status" aria-live="polite"></div>
+</div>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var R = JSON.parse(document.getElementById("data").textContent);
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var STATE = [
+    {k: "done", label: "Done", color: "--good", icon: "✓"},
+    {k: "running", label: "Running", color: "--st-running"},
+    {k: "queued", label: "Queued", color: "--st-queued"},
+    {k: "failed", label: "Failed", color: "--critical", icon: "✕"},
+    {k: "lost", label: "Lost (no record)", color: "--warning", icon: "?"},
+    {k: "rest", label: "Not submitted", color: "--st-new"}
+  ];
+  function css(v) { return getComputedStyle(document.getElementById("root")).getPropertyValue(v).trim(); }
+  function h(tag, cls, text, parent) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function fmt(n) {
+    if (n === null || n === undefined) return "–";
+    var a = Math.abs(n);
+    if (a >= 1e9) return (n / 1e9).toFixed(1) + "B";
+    if (a >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (a >= 1e4) return (n / 1e3).toFixed(1) + "K";
+    return Math.round(n).toLocaleString();
+  }
+  function ago(t) {
+    if (!t) return "never";
+    var m = (Date.now() / 1000 - t) / 60;
+    return m < 1 ? "just now" : m < 120 ? Math.round(m) + " min ago" :
+           m < 2880 ? (m / 60).toFixed(1) + " h ago" : Math.round(m / 1440) + " days ago";
+  }
+  var tip = document.getElementById("tip");
+  function showTip(evt, title, rows) {
+    tip.textContent = "";
+    h("div", "t", title, tip);
+    rows.forEach(function (r) {
+      var row = h("div", "row", null, tip);
+      var k = h("span", "k", null, row); k.style.background = r.color;
+      h("b", null, r.value, row); h("span", null, r.label, row);
+    });
+    tip.style.display = "block";
+    var x = evt.clientX + 14, y = evt.clientY + 14;
+    if (x + tip.offsetWidth > window.innerWidth - 8) x = evt.clientX - tip.offsetWidth - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  function hideTip() { tip.style.display = "none"; }
+  function render() {
+    var lg = document.getElementById("legend"); lg.textContent = "";
+    STATE.forEach(function (st) {
+      var k = h("span", "key", null, lg);
+      var sw = h("span", "sw", null, k); sw.style.background = css(st.color);
+      if (st.icon) h("span", "ic", st.icon, k);
+      h("span", null, st.label, k);
+    });
+    var camps = Object.keys(R.campaigns || {}).map(function (k) { return R.campaigns[k]; })
+      .sort(function (a, b) { return (b.updated || 0) - (a.updated || 0); });
+    var box = document.getElementById("table"); box.textContent = "";
+    if (!camps.length) { h("div", "empty", "No campaigns yet.", box); return; }
+    var table = h("table", null, null, box);
+    var hr = h("tr", null, null, h("thead", null, null, table));
+    ["Campaign", "Site", "Updated", "Events generated", "Stages", "Failed"].forEach(function (c, i) {
+      h("th", i === 3 || i === 5 ? "num" : null, c, hr);
+    });
+    var body = h("tbody", null, null, table);
+    camps.forEach(function (c) {
+      var tr = h("tr", null, null, body);
+      var td = h("td", null, null, tr);
+      var a = h("a", null, c.campaign, td); a.href = c.path + "/index.html";
+      if (c.description) h("div", "muted", c.description.slice(0, 90), td);
+      h("td", null, c.site, tr);
+      h("td", null, ago(c.updated) + (c.source === "jobs" ? " (job records)" : ""), tr);
+      var pct = c.planned_events ? Math.round(100 * c.events / c.planned_events) : 0;
+      h("td", "num", fmt(c.events) + " / " + fmt(c.planned_events) + " (" + pct + "%)", tr);
+      var sc = h("td", "stages", null, tr);
+      var failed = 0;
+      c.stages.forEach(function (s) {
+        failed += s.failed;
+        if (!s.enabled) return;
+        var mb = h("span", "minibar", null, sc);
+        h("span", "lab", s.alias + "  " + fmt(s.done) + "/" + fmt(s.tasks), mb);
+        var W = 96, H = 8, svg = el("svg", {width: W, height: H}, mb);
+        var cp = el("clipPath", {id: "c" + Math.random().toString(36).slice(2)}, el("defs", {}, svg));
+        el("rect", {x: 0, y: 0, width: W, height: H, rx: 3}, cp);
+        var g = el("g", {"clip-path": "url(#" + cp.id + ")"}, svg);
+        var n = {done: s.done, running: s.running, queued: s.queued, failed: s.failed, lost: s.lost || 0};
+        n.rest = Math.max(0, s.tasks - n.done - n.running - n.queued - n.failed - n.lost);
+        var x = 0, tot = Math.max(s.tasks, 1);
+        STATE.forEach(function (st) {
+          if (!n[st.k]) return;
+          var w = W * n[st.k] / tot;
+          el("rect", {x: x, y: 0, width: Math.max(w - 2, 1), height: H, fill: css(st.color)}, g);
+          x += w;
+        });
+        var hit = el("rect", {x: 0, y: -6, width: W, height: H + 12, fill: "transparent"}, svg);
+        hit.addEventListener("pointermove", function (e) {
+          showTip(e, c.campaign + " · " + s.alias + " " + s.name, STATE.filter(function (st) { return n[st.k]; })
+            .map(function (st) { return {value: fmt(n[st.k]), label: st.label, color: css(st.color)}; }));
+        });
+        hit.addEventListener("pointerleave", hideTip);
+      });
+      h("td", "num", fmt(failed), tr);
+    });
+    var f = document.getElementById("freshness");
+    f.textContent = "list updated " + ago(R.written);
+  }
+  var saved = null;
+  try { saved = localStorage.getItem("dprod-theme"); } catch (e) {}
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+  document.getElementById("themebtn").addEventListener("click", function () {
+    var dark = document.documentElement.getAttribute("data-theme") === "dark" ||
+      (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var next = dark ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("dprod-theme", next); } catch (e) {}
+    render();
+  });
+  render();
+  if (location.protocol !== "file:") setInterval(function () {
+    fetch("campaigns.json?t=" + Date.now(), {cache: "no-store"})
+      .then(function (r) { return r.json(); }).then(function (d) { R = d; render(); }).catch(function () {});
+  }, 60000);
+})();
+</script>
+</body>
+</html>
+"""
+HUB = HUB.replace("__STYLE__", PAGE.split("<style>", 1)[1].split("</style>", 1)[0])

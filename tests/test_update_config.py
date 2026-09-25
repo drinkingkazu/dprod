@@ -18,6 +18,7 @@ if os.path.exists(ROOT):
     shutil.rmtree(ROOT)
 os.makedirs(os.path.join(ROOT, "fail"))
 os.environ["DPROD_LOCAL_ROOT"] = ROOT
+os.environ["DPROD_BATCH"] = "1"          # no confirmation prompts in tests
 site = os.path.join(ROOT, "site.yaml")
 text = open(os.path.join(HERE, "..", "configs", "sites", "local.yaml")).read()
 open(site, "w").write(text.replace("vars:", "vars:\n  test_dir: %s\n  fail_dir: %s" % (HERE, os.path.join(ROOT, "fail")), 1))
@@ -37,7 +38,8 @@ def dprod(*args, rc=0):
 
 
 dprod("init", v1)
-dprod("advance")                                            # 1 and 2A (3A disabled)
+dprod("advance")                                            # 1
+dprod("advance")                                            # 2A (planned once 1 is done; 3A disabled)
 c = Campaign(C.load_site(site), TAG)
 c.sync()
 assert [t["status"] for t in D.tasks(c.con, "jaxtpc_wire")] == ["done"]

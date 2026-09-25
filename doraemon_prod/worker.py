@@ -569,7 +569,8 @@ def run_task(m, index, work_root):
             write_record(cdir, stage, task, "done" if summary["status"] == "ok" else "failed",
                          summary, m.get("time_limit_s"))
             if web.get("dir") and web.get("enabled", True):
-                rebuild_from_job(cdir, web["dir"], web.get("job_rebuild_s", 300), log=log)
+                rebuild_from_job(cdir, web["dir"], web.get("job_rebuild_s", 300), log=log,
+                                 base=web.get("base"))
         except Exception as e:
             log("warning: monitoring snapshot not updated: %s" % e)
     return 0 if summary["status"] == "ok" else 1

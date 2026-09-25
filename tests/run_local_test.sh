@@ -12,6 +12,7 @@ IMG1=${IMG1:-/home/kazu/sw/images/larcv2_ub2204-cuda121-torch251-larndsim-2025-0
 IMG23=${IMG23:-/home/kazu/sw/images/test.sif}
 rm -rf "$ROOT"; mkdir -p "$ROOT/fail"
 export DPROD_LOCAL_ROOT="$ROOT"
+export DPROD_BATCH=1                         # no confirmation prompts
 
 # site config for the test: the local site + variables used by the fake stage 2
 sed -e "s#^vars:#vars:\n  test_dir: $HERE/tests\n  fail_dir: $ROOT/fail#" \

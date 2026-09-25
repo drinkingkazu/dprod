@@ -64,10 +64,26 @@ dprod update-config <new.yaml>  # change a running campaign's config (checked ag
 dprod destroy                   # cancel all jobs, delete all files of the campaign (asks for the tag)
 ```
 
+### Confirmation before submitting
+
+`submit`, `recover` and `advance` first print what they are about to submit, then ask `Proceed? [y/N]`:
+```
+Submission plan for campaign test_doraemon_2026_v0.1 (site s3df):
+  stage kind   tasks arrays  stage-1 jobs    events  partition  account            qos          time      gpus
+  1     new      300      3   300 (0-299)    60,000  milano     mli:nu-ml-dev      preemptable  00:20:00  -
+  2A    new       12      1     60 (0-59)    12,000  ampere     neutrino:ml-dev    -            02:00:00  1
+  total: 312 task(s) in 4 array(s), 72,000 events
+```
+Exactly the plan you confirm is submitted. `--batch` (or `-y`, or `DPROD_BATCH=1` in the environment)
+skips the question, and the summary is still printed. Without a terminal (scripts), a command refuses to submit
+unless batch mode is on. `watch` and `dprod-cron` never ask, but they log the plan every round. `--dry-run` shows
+the plan and writes the scripts without submitting.
+
 ### Keeping all stages moving: `advance` and `watch`
 
 `dprod advance` syncs with slurm, then goes through the stages in order (1, 2A, 2B, 3A, 3B).
-For each one it submits every task whose inputs are ready. With `--recover` it also resubmits failed tasks that
+For each one it submits every task whose inputs are ready, after the confirmation above. It plans once:
+stage-2 tasks that become ready only after this call's stage-1 jobs finish go out on a later call. With `--recover` it also resubmits failed tasks that
 still have attempts left. So stage 2A task *k* goes out as soon as the stage-1 jobs it needs are
 done, while other stage-1 jobs are still queued.
 

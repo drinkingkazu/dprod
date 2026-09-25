@@ -397,14 +397,66 @@ class Campaign:
                 out.append(e)
         return out
 
-    def submit(self, stage, recovery=False, task_ids=None, limit=None, dry_run=False,
-               force=False, reseed=False):
+    def plan(self, stage, recovery=False, task_ids=None, limit=None, force=False, reseed=False):
+        """The task entries a submit would send (nothing is submitted)."""
         s = self.cfg["stages"][stage]
         if not s["enabled"]:
             raise CampaignError("stage %s is disabled (enabled: false in the campaign config)" % stage)
         entries = self.candidates(stage, recovery, task_ids, force, reseed)
-        if limit is not None:
-            entries = entries[:limit]
+        return entries[:limit] if limit is not None else entries
+
+    def plan_advance(self, stages=None, recover=False, max_queued=None):
+        """What `advance` would submit now: [(stage, recovery, entries)], nothing submitted."""
+        self.sync()
+        items = []
+        for stage in stages or list(self.cfg["stages"]):
+            s = self.cfg["stages"][stage]
+            if not s["enabled"]:
+                continue
+            cap = max_queued if max_queued is not None else s["max_queued"]
+            n = 0
+            for recovery in ((False, True) if recover else (False,)):
+                limit = None
+                if cap is not None:
+                    limit = max(0, int(cap) - self.n_active(stage) - n)
+                    if limit == 0:
+                        break
+                entries = self.plan(stage, recovery=recovery, limit=limit)
+                if entries:
+                    items.append((stage, recovery, entries))
+                    n += len(entries)
+        return items
+
+    def plan_summary(self, items):
+        """Rows describing planned submissions: tasks, arrays, jobs, events, slurm settings."""
+        rows = []
+        n = int(self.site["max_array_size"])
+        for stage, recovery, entries in items:
+            s = self.cfg["stages"][stage]
+            opts = self.slurm_opts(s)
+            root = not s["parent"]
+            jobs = sorted(set(j for e in entries for j in range(e["first_job"], e["last_job"] + 1)))
+            if root:
+                events = len(jobs) * int(s["events_per_job"] or 0)
+            else:
+                events = sum(e.get("expected_events") or 0 for e in entries)
+            rows.append({
+                "stage": stage, "alias": s["alias"] or stage,
+                "kind": "retry" if recovery else "new", "tasks": len(entries),
+                "arrays": (len(entries) + n - 1) // n, "jobs": len(jobs),
+                "job_range": "%d-%d" % (jobs[0], jobs[-1]) if jobs else "",
+                "events": events,
+                "partition": opts.get("partition") or opts.get("constraint") or "",
+                "account": opts.get("account") or "", "qos": opts.get("qos") or "",
+                "time": opts.get("time") or "", "gpus": opts.get("gpus") or "",
+            })
+        return rows
+
+    def submit(self, stage, recovery=False, task_ids=None, limit=None, dry_run=False,
+               force=False, reseed=False, entries=None):
+        s = self.cfg["stages"][stage]
+        if entries is None:
+            entries = self.plan(stage, recovery, task_ids, limit, force, reseed)
         n = int(self.site["max_array_size"])
         chunks = [entries[i:i + n] for i in range(0, len(entries), n)]
         results = []
@@ -417,15 +469,26 @@ class Campaign:
         return self.con.execute("SELECT COUNT(*) FROM attempts WHERE stage = ? AND state IN"
                                 " ('submitted', 'running')", (stage,)).fetchone()[0]
 
-    def advance(self, stages=None, recover=False, max_queued=None, dry_run=False, out=print):
+    def advance(self, stages=None, recover=False, max_queued=None, dry_run=False, out=print,
+                plan=None):
         """Sync, then submit every ready task of every enabled stage (in stage order).
 
         recover     also resubmit failed tasks that have attempts left
         max_queued  per-stage cap on queued+running array elements (overrides the
                     stage's `max_queued`); None = no cap
+        plan        submit exactly this plan_advance() result instead of re-planning
         Returns {stage: number of tasks submitted}.
         """
         submitted = {}
+        if plan is not None:
+            for stage, recovery, entries in plan:
+                for r in self.submit(stage, recovery=recovery, dry_run=dry_run, entries=entries):
+                    submitted[stage] = submitted.get(stage, 0) + r["n_tasks"]
+                    out("%s%s: %s %d task(s) [%s]%s" % (
+                        "[dry-run] " if dry_run else "", stage,
+                        "resubmitted" if recovery else "submitted", r["n_tasks"],
+                        _span(r["task_ids"]), "" if dry_run else " as array %s" % r["array_job_id"]))
+            return submitted
         for stage in stages or list(self.cfg["stages"]):
             s = self.cfg["stages"][stage]
             if not s["enabled"]:
@@ -461,9 +524,10 @@ class Campaign:
         return {"active": active, "ready": ready, "retryable": retry}
 
     def _web_settings(self):
-        from .web import web_dir
+        from .web import web_base, web_dir
         web = self.site.get("web") or {}
-        return {"dir": web_dir(self), "job_rebuild_s": int(web.get("job_rebuild_s", 300)),
+        return {"dir": web_dir(self), "base": web_base(self.site),
+                "job_rebuild_s": int(web.get("job_rebuild_s", 300)),
                 "enabled": bool(web.get("job_snapshot", True))}
 
     def _manifest(self, s, sub_id, entries):
@@ -819,6 +883,15 @@ class Campaign:
                 out("warning: %d element(s) still active after %d s; deleting anyway" % (
                     len(left), wait_s))
         self.con.close()
+        try:
+            from .web import web_base
+            from .webdata import update_registry, REGISTRY
+            base = web_base(self.site)
+            if os.path.exists(os.path.join(base, REGISTRY)):
+                from .web import write_hub
+                write_hub(base, update_registry(base, self.tag, remove=True))
+        except Exception as e:
+            out("warning: could not remove %s from the campaign list: %s" % (self.tag, e))
         removed = []
         for p, size in plan:
             rp = os.path.realpath(p)

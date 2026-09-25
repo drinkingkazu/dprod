@@ -286,7 +286,7 @@ def _still_active(campaign_dir, snapshot):
     return n
 
 
-def rebuild_from_job(campaign_dir, web_dir, min_interval=300, force=False, log=None):
+def rebuild_from_job(campaign_dir, web_dir, min_interval=300, force=False, log=None, base=None):
     """Worker, at the end of a task: refresh <web_dir>/jobs.json (+ index.html).
 
     Rate limited: skipped if jobs.json is younger than min_interval s, unless no
@@ -308,9 +308,56 @@ def rebuild_from_job(campaign_dir, web_dir, min_interval=300, force=False, log=N
                 return False              # another job is rebuilding right now
         data = from_records(campaign_dir)
         from .web import write_files   # page template lives with the controller code
-        write_files(web_dir, data, "jobs.json")
+        write_files(web_dir, data, "jobs.json", base=base)
         if log:
             log("monitoring snapshot updated: %s" % out)
         return True
     finally:
         lock.close()
+
+
+# --------------------------------------------------------------------------- campaign registry
+
+REGISTRY = "campaigns.json"
+
+
+def registry_entry(tag, path, data):
+    """Short per-campaign summary for the campaign switcher and overview page."""
+    stages = data.get("stages") or []
+    return {
+        "campaign": tag, "path": path, "site": data.get("site", ""),
+        "description": data.get("description", ""), "updated": data.get("generated"),
+        "source": data.get("source", "controller"),
+        "planned_events": data.get("planned_events") or 0,
+        "events": stages[0]["events"] if stages else 0,
+        "stages": [{"alias": s["alias"], "name": s["name"], "enabled": s["enabled"],
+                    "tasks": s["tasks"], "done": s["counts"].get("done", 0),
+                    "failed": s["counts"].get("failed", 0), "lost": s["counts"].get("lost", 0),
+                    "running": (data.get("active") or {}).get(s["name"], {}).get("running", 0),
+                    "queued": (data.get("active") or {}).get(s["name"], {}).get("queued", 0),
+                    "events": s["events"]} for s in stages],
+    }
+
+
+def update_registry(base, tag, page_dir=None, data=None, remove=False):
+    """Add/refresh (or remove) a campaign in <base>/campaigns.json; returns the registry.
+    A newer entry is never replaced by an older one (controller vs job snapshots)."""
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, REGISTRY)
+    with open(os.path.join(base, ".campaigns.lock"), "a") as lock:
+        fcntl.lockf(lock, fcntl.LOCK_EX)          # short critical section; wait for it
+        try:
+            reg = _load(path) or {"campaigns": {}}
+            camps = reg.setdefault("campaigns", {})
+            if remove:
+                camps.pop(tag, None)
+            elif data is not None:
+                rel = os.path.relpath(page_dir, base)
+                old = camps.get(tag)
+                if not old or (old.get("updated") or 0) <= (data.get("generated") or 0):
+                    camps[tag] = registry_entry(tag, rel, data)
+            reg["written"] = time.time()
+            write_json_atomic(path, reg)
+        finally:
+            fcntl.lockf(lock, fcntl.LOCK_UN)
+    return reg

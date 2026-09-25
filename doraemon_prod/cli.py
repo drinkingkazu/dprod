@@ -121,14 +121,59 @@ def cmd_extend(a):
     print("added %d job(s); campaign now has %d" % (n, a.n_jobs))
 
 
+def print_plan(c, items, out=print):
+    rows = c.plan_summary(items)
+    out("Submission plan for campaign %s (site %s):" % (c.tag, c.site["name"]))
+    hdr = "  %-5s %-5s %6s %6s %13s %9s  %-10s %-18s %-12s %-9s %s" % (
+        "stage", "kind", "tasks", "arrays", "stage-1 jobs", "events", "partition", "account", "qos",
+        "time", "gpus")
+    out(hdr)
+    for r in rows:
+        out("  %-5s %-5s %6d %6d %13s %9s  %-10s %-18s %-12s %-9s %s" % (
+            r["alias"], r["kind"], r["tasks"], r["arrays"],
+            "%d (%s)" % (r["jobs"], r["job_range"]) if r["jobs"] > 1 else r["job_range"],
+            "{:,}".format(r["events"]), r["partition"] or "-", r["account"] or "-", r["qos"] or "-",
+            r["time"] or "-", r["gpus"] or "-"))
+    out("  total: %d task(s) in %d array(s), %s events" % (
+        sum(r["tasks"] for r in rows), sum(r["arrays"] for r in rows),
+        "{:,}".format(sum(r["events"] for r in rows))))
+    if c.slurm_override:
+        out("  slurm overrides (this command only): %s" % " ".join(
+            "%s=%s" % kv for kv in c.slurm_override.items()))
+    return rows
+
+
+def _batch(a):
+    return getattr(a, "batch", False) or os.environ.get("DPROD_BATCH", "") not in ("", "0")
+
+
+def confirm_plan(c, items, a):
+    """Show the plan; ask yes/no unless --batch / DPROD_BATCH / --dry-run. True = go."""
+    if not items:
+        return False
+    print_plan(c, items)
+    if getattr(a, "dry_run", False) or _batch(a):
+        return True
+    if not sys.stdin.isatty():
+        raise CampaignError("not a terminal: add --batch (or set DPROD_BATCH=1) to submit without "
+                            "confirmation")
+    answer = input("Proceed? [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("not submitted")
+        return False
+    return True
+
+
 def _do_submit(a, recovery):
     c = _open(a)
     c.slurm_override = _slurm_override(a)
     c.sync()
     stage = C.resolve_stage(c.cfg, a.stage)
-    res = c.submit(stage, recovery=recovery, task_ids=parse_ids(a.tasks), limit=a.limit,
-                   dry_run=a.dry_run, force=getattr(a, "force", False),
-                   reseed=getattr(a, "reseed", False))
+    entries = c.plan(stage, recovery=recovery, task_ids=parse_ids(a.tasks), limit=a.limit,
+                     force=getattr(a, "force", False), reseed=getattr(a, "reseed", False))
+    if entries and not confirm_plan(c, [(stage, recovery, entries)], a):
+        return
+    res = c.submit(stage, recovery=recovery, dry_run=a.dry_run, entries=entries) if entries else []
     if not res:
         what = "failed tasks eligible for recovery" if recovery else "ready new tasks"
         print("%s: no %s" % (stage, what))
@@ -156,9 +201,13 @@ def cmd_advance(a):
     c = _open(a)
     c.slurm_override = _slurm_override(a)
     stages = _stages(c, a.stages) if a.stages else None
-    res = c.advance(stages, recover=a.recover, max_queued=a.max_queued, dry_run=a.dry_run)
-    if not any(res.values()):
+    plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued)
+    if not plan:
         print("nothing ready to submit")
+    elif confirm_plan(c, plan, a):
+        c.advance(recover=a.recover, dry_run=a.dry_run, plan=plan)
+    p = c.progress()
+    print("active %d, ready %d, retryable failed %d" % (p["active"], p["ready"], p["retryable"]))
     p = c.progress()
     print("active %d, ready %d, retryable failed %d" % (p["active"], p["ready"], p["retryable"]))
 
@@ -180,7 +229,10 @@ def cmd_watch(a):
             rounds += 1
             print("\n=== %s round %d" % (time.strftime("%Y-%m-%d %H:%M:%S"), rounds))
             with c.lock():
-                res = c.advance(stages, recover=a.recover, max_queued=a.max_queued)
+                plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued)
+                if plan:
+                    print_plan(c, plan)          # unattended: logged, not asked
+                res = c.advance(recover=a.recover, plan=plan)
                 if not any(res.values()):
                     print("nothing new to submit")
                 c.sync()
@@ -551,6 +603,8 @@ def build_parser():
         p.add_argument("--limit", type=int, help="submit at most this many tasks")
         p.add_argument("--dry-run", action="store_true", help="write scripts, do not submit")
         _add_slurm_args(p)
+        p.add_argument("--batch", "-y", action="store_true",
+                       help="do not ask for confirmation (also: DPROD_BATCH=1)")
         if name == "recover":
             p.add_argument("--force", action="store_true", help="ignore max_attempts")
             p.add_argument("--reseed", action="store_true",
@@ -565,6 +619,8 @@ def build_parser():
     p.add_argument("--max-queued", type=int,
                    help="per stage, keep at most this many queued+running elements")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--batch", "-y", action="store_true",
+                   help="do not ask for confirmation (also: DPROD_BATCH=1)")
     _add_slurm_args(p)
     p.set_defaults(func=cmd_advance)
 

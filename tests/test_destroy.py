@@ -18,6 +18,7 @@ if os.path.exists(ROOT):
     shutil.rmtree(ROOT)
 os.makedirs(os.path.join(ROOT, "fail"))
 os.environ["DPROD_LOCAL_ROOT"] = ROOT
+os.environ["DPROD_BATCH"] = "1"          # no confirmation prompts in tests
 
 
 class Deferred(LocalScheduler):
@@ -92,7 +93,11 @@ assert len(Deferred.cancelled) == 3, Deferred.cancelled                  # its 3
 assert not any(os.path.exists(p) for p in (cdir, logdir, webdir)), [p for p in (cdir, logdir, webdir) if os.path.exists(p)]
 assert os.path.isdir(os.path.join(ROOT, "storage", "keepme")) and os.path.isdir(os.path.join(ROOT, "www", "keepme"))
 assert os.path.isdir(os.path.join(ROOT, "storage")) and os.path.isdir(os.path.join(ROOT, "joblog"))
+reg = json.load(open(os.path.join(ROOT, "www", "campaigns.json")))["campaigns"]
+assert "desttest" not in reg and "keepme" in reg, sorted(reg)
+assert "keepme" in open(os.path.join(ROOT, "www", "index.html")).read()
 print("OK: destroy cancelled the queued jobs and removed campaign dir, log dir and web dir; others untouched")
+print("OK: the campaign is gone from campaigns.json and the all-campaigns page")
 
 assert d(site_b, "sharedweb", "destroy", "--confirm", "sharedweb") == 0
 assert not os.path.exists(os.path.join(ROOT, "storage", "sharedweb"))
