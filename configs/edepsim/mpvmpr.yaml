@@ -11,7 +11,7 @@ Generator1:
   XRange: [-2160, 2160] #mm
   YRange: [-2160, 2160] #mm
   ZRange: [-2160, 2160] #mm
-  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  TRange: [0,1310000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
   AddParent: True
   Particles:
     -
@@ -30,7 +30,7 @@ Generator1:
 
     -
       PDG:      [22]
-      NumRange: [0,2]
+      NumRange: [0,1]
       KERange:  [0.01,1.2]
       UseMom:   True
       Weight:   1
@@ -49,7 +49,7 @@ Generator2:
   XRange: [-2160, 2160] #mm
   YRange: [-2160, 2160] #mm
   ZRange: [-2160, 2160] #mm
-  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  TRange: [0,1310000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
   AddParent: True
   Particles:
     -
@@ -68,7 +68,7 @@ Generator2:
 
     -
       PDG:      [22]
-      NumRange: [0,2]
+      NumRange: [0,1]
       KERange:  [0.01,1.2]
       UseMom:   True
       Weight:   1
@@ -88,7 +88,7 @@ Generator3:
   XRange: [-2160, 2160] #mm
   YRange: [-2160, 2160] #mm
   ZRange: [-2160, 2160] #mm
-  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  TRange: [0,1310000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
   AddParent: True
   Particles:
     -
@@ -100,7 +100,7 @@ Generator3:
 
     -
       PDG:      [22]
-      NumRange: [0,2]
+      NumRange: [0,1]
       KERange:  [0.01,1.2]
       UseMom:   True
       Weight:   1
@@ -120,7 +120,7 @@ Generator4:
   XRange: [-2160, 2160] #mm
   YRange: [-2160, 2160] #mm
   ZRange: [-1260, 2160] #mm
-  TRange: [-150000,1460000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
+  TRange: [0,1310000] # 2160mm / Vd=1.648mm/us = 1310us, +/-150us buffer in ns
   AddParent: True
   ShootInward: True
   Particles:

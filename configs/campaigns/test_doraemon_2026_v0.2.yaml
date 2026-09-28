@@ -1,7 +1,7 @@
 # Campaign definition. Frozen into <storage_root>/<campaign>/campaign.yaml by
 # `dprod init`; edit this file *before* init. Site-specific settings (paths,
 # accounts, images) live in configs/sites/*.yaml.
-campaign: test_doraemon_2026_v0.1
+campaign: test_doraemon_2026_v0.2
 description: >
   Test campaign: MPV/MPR particle bomb in a 4 m LAr cube, wire + pixel readout.
 seed: 20260923          # master seed; every job's seeds are derived from (seed, job id)
@@ -14,14 +14,14 @@ stages:
     handler: edepsim
     image: stage1
     profile: cpu
-    n_jobs: 20
-    events_per_job: 100
+    n_jobs: 500
+    events_per_job: 200
     input_dir: configs/edepsim    # relative to the repo; copied into the campaign dir
     geometry: BigLArCube.gdml
     macro: biglarbox.mac          # seed and run-id commands are replaced per job
     generator_config: mpvmpr.yaml # its SEED is replaced per job
     slurm:
-      time: "01:00:00"
+      time: "00:40:00"
     # geometry, macro and generator yaml (as executed), the campaign config and
     # the edep-sim binary are embedded automatically; add source checkouts:
     provenance:
@@ -35,7 +35,7 @@ stages:
   jaxtpc_wire:
     alias: 2A
     parent: edepsim
-    merge: 2
+    merge: 5
     image: stage23
     profile: gpu
     command: >-
@@ -66,7 +66,7 @@ stages:
   jaxtpc_pixel:
     alias: 2B
     parent: edepsim
-    merge: 2
+    merge: 5
     image: stage23
     profile: gpu
     command: >-

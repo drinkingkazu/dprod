@@ -55,11 +55,12 @@ slurm:
       cpus_per_task: 1
       mem_per_cpu: 12G
       time: "02:00:00"
-    cron:                 # controller rounds (bin/dprod-cron --loop): used alone, not merged
-                          # with slurm.default above, so its preemptable QOS does not apply
-      partition: milano
+      # controller rounds (bin/dprod-cron --loop): used alone, not merged
+      # with slurm.default above, so its preemptable QOS does not apply
+    cron:
+      partition: turing
       account: mli:nu-ml-dev
-      qos: normal         # TODO: the non-preemptable QOS of this account
+      qos: null
       cpus_per_task: 1
       mem: 4G
       time: "00:30:00"
