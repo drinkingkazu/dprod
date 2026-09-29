@@ -122,6 +122,7 @@ stages:
       files:
         pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
         pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_wire.yaml"
+        pysupera_readout: "{pysupera_dir}/pysupera/conf/readout/jaxtpc_wire.yaml"
       software:
         pysupera: "{pysupera_dir}"
     slurm:
@@ -151,6 +152,7 @@ stages:
       files:
         pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
         pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_pixel.yaml"
+        pysupera_readout: "{pysupera_dir}/pysupera/conf/readout/jaxtpc_pixel.yaml"
       software:
         pysupera: "{pysupera_dir}"
     slurm:

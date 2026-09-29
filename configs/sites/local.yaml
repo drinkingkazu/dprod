@@ -20,7 +20,7 @@ vars:
   edepsim_exe: edep-sim
   edepsim_dir: /home/kazu/sw/edep-sim          # source checkouts, recorded in provenance
   dlpgen_dir: /home/kazu/sw/dlp_generator/DLPGenerator
-  jaxtpc_dir: /home/kazu/sw/doraemon/JAXTPC
+  jaxtpc_dir: /home/kazu/sw/scratch/JAXTPC
   pysupera_dir: /home/kazu/sw/scratch/pysupera
 
 env:

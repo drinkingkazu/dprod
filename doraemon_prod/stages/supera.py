@@ -5,14 +5,15 @@
         [-- extra run_pysupera overrides, e.g. distance_threshold=5.0]
 
 For every edep-sim file (one stage-1 job) this finds the JAXTPC step and hits
-files made from it, runs
+(and, for pixel, sensor) files made from it, runs
 
     run_pysupera reader=jaxtpc_<readout> io.input_path=<edep-sim>
         io.output_path=<outdir>/supera_<readout>_jNNNNNN-NNNNNN.h5
-        reader.jaxtpc_seg_path=<step> reader.jaxtpc_inst_path=<hits> [extra]
+        reader.jaxtpc_seg_path=<step> reader.jaxtpc_inst_path=<hits>
+        [reader.jaxtpc_sensor_path=<sensor>] [extra]
 
 and then adds events/job_id and events/event_id (n_events,) to the output,
-taken from the edep-sim event table, because pysupera's own format (3.1.0)
+taken from the edep-sim event table, because pysupera's own format (3.3.0)
 does not carry them. It checks that pysupera wrote one output event per input
 event before doing so.
 
@@ -93,22 +94,27 @@ def main(argv=None):
         exe = ["run_pysupera"]
     else:
         exe = [sys.executable, "-m", "pysupera._run"]
-    files = index_jaxtpc(a.jaxtpc)
+    # the pixel reader reads hits as the detected image and needs the sensor file
+    roles = ("step", "hits", "sensor") if a.readout == "pixel" else ("step", "hits")
+    files = index_jaxtpc(a.jaxtpc, roles)
     n_done = 0
     for edep in a.edepsim:
         ids = read_event_table(edep, os.path.basename(edep), {})
         if len(ids) != 1:
             raise IdReadError("%s holds %d jobs; expected one" % (edep, len(ids)))
         job, events = next(iter(ids.items()))
-        step, hits = files["step"].get(job), files["hits"].get(job)
-        if not step or not hits:
-            raise IdReadError("job %d: JAXTPC step/hits file missing (step=%s, hits=%s)" % (
-                job, step, hits))
+        paths = {r: files[r].get(job) for r in roles}
+        if not all(paths.values()):
+            raise IdReadError("job %d: JAXTPC file missing (%s)" % (
+                job, ", ".join("%s=%s" % rp for rp in paths.items())))
         out = os.path.join(a.outdir, "supera_%s_j%0*d-%0*d.h5" % (
             a.readout, JOB_DIGITS, job, JOB_DIGITS, job))
         cmd = exe + ["reader=jaxtpc_%s" % a.readout, "io.input_path=%s" % edep,
-               "io.output_path=%s" % out, "reader.jaxtpc_seg_path=%s" % step,
-               "reader.jaxtpc_inst_path=%s" % hits] + extra
+               "io.output_path=%s" % out, "reader.jaxtpc_seg_path=%s" % paths["step"],
+               "reader.jaxtpc_inst_path=%s" % paths["hits"]]
+        if "sensor" in paths:
+            cmd.append("reader.jaxtpc_sensor_path=%s" % paths["sensor"])
+        cmd += extra
         log("job %d: %s" % (job, " ".join(shlex.quote(c) for c in cmd)))
         t0 = time.time()
         rc = subprocess.call(cmd)
