@@ -260,8 +260,22 @@ def _do_submit(a, recovery):
     c.slurm_override = _slurm_override(a)
     c.sync()
     stage = C.resolve_stage(c.cfg, a.stage)
-    entries = c.plan(stage, recovery=recovery, task_ids=parse_ids(a.tasks), limit=a.limit,
+    limit = a.limit
+    cap = a.max_queued if a.max_queued is not None else c.cfg["stages"][stage]["max_queued"]
+    if cap is not None:
+        active = c.n_active(stage)
+        room = max(0, int(cap) - active)
+        if room == 0:
+            print("%s: %d element(s) already queued/running, max_queued %d: nothing submitted"
+                  " (--max-queued N to override)" % (stage, active, int(cap)))
+            return
+        if limit is None or room < limit:
+            limit = room
+    entries = c.plan(stage, recovery=recovery, task_ids=parse_ids(a.tasks), limit=limit,
                      force=getattr(a, "force", False), reseed=getattr(a, "reseed", False))
+    if cap is not None and limit == room and len(entries) == limit:
+        print("%s: max_queued %d (%d queued/running): submitting at most %d task(s)"
+              % (stage, int(cap), active, limit))
     if entries and not confirm_plan(c, [(stage, recovery, entries)], a):
         return
     res = c.submit(stage, recovery=recovery, dry_run=a.dry_run, entries=entries) if entries else []
@@ -727,6 +741,9 @@ def build_parser():
         p.add_argument("stage", help="stage name or alias (1, 2A, 2B, 3A, 3B)")
         p.add_argument("--tasks", help="restrict to task ids, e.g. 0-99,120")
         p.add_argument("--limit", type=int, help="submit at most this many tasks")
+        p.add_argument("--max-queued", type=int,
+                       help="keep at most this many queued+running elements of the stage"
+                            " (overrides the stage's max_queued)")
         p.add_argument("--dry-run", action="store_true", help="write scripts, do not submit")
         _add_slurm_args(p)
         p.add_argument("--batch", "-y", action="store_true",

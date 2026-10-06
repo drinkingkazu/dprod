@@ -107,6 +107,11 @@ dprod("advance", "--max-queued", "4")
 s1 = states("edepsim")
 assert [s1[i] for i in range(6)] == ["submitted"] * 4 + ["new"] * 2, s1
 assert set(states("jaxtpc_wire").values()) == {"new"}
+dprod("submit", "1", "--max-queued", "4")      # cap reached: nothing
+assert [states("edepsim")[i] for i in range(6)] == ["submitted"] * 4 + ["new"] * 2
+dprod("submit", "1", "--max-queued", "5")      # room for one more
+assert [states("edepsim")[i] for i in range(6)] == ["submitted"] * 5 + ["new"]
+print("OK: submit honors max_queued")
 
 # 2. jobs 0 and 1 finish -> 2A task 0 (jobs 0-1) goes out while jobs 2-5 are not done
 assert sched.run(2) == 2

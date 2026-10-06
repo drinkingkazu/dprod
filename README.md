@@ -107,8 +107,9 @@ bin/dprod watch --recover --merge-summary --web   # Ctrl-b d to detach; tmux att
 ```
 `dprod watch --once` does a single round, for cron-style use.
 
-* **Throttle:** `--max-queued N`, or `max_queued: N` in a stage of the campaign config, keeps at most N array
-  elements of a stage queued or running. This lets a 5000-job campaign go in gradually.
+* **Throttle:** `max_queued: N` in a stage of the campaign config keeps at most N array elements of that stage
+  queued or running. `submit`, `recover`, `advance` and `watch` all honor it; `--max-queued N` on any of them
+  overrides it for that command. This lets a 5000-job campaign go in gradually.
 * **Lock:** every command that changes the bookkeeping takes a campaign lock (`<campaign>/.dprod.lock`).
   A manual `submit` while `watch` runs waits for its turn, so the same task can't be submitted twice.
   It uses POSIX locks on the shared filesystem, so it also works across nodes (e.g. a scrontab round vs. sdfiana).

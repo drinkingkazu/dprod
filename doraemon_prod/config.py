@@ -67,10 +67,11 @@ STAGE_DEFAULTS = {
     "provenance": {"roles": None, "files": {}, "software": {}},
     "external": None,              # set for stages inherited from another campaign (read-only)
     "external_dir": None,          # that campaign's directory
-    "max_queued": None,
+    "max_queued": None,            # submit/recover/advance/watch: keep at most this many elements
+                                   # of the stage queued+running (None = no cap)
     "check_imports": ["h5py"],     # python modules `dprod check` imports inside the stage image
     "pythonpath": [],              # dirs put first on PYTHONPATH for the stage command (and for
-                                   # `dprod check`), e.g. ["{pysupera_dir}"]; may use {vars}            # advance/watch: keep at most this many elements queued+running
+                                   # `dprod check`), e.g. ["{pysupera_dir}"]; may use {vars}
     "monitor_gpu": None,           # sample GPU use; None = auto (slurm options request GPUs)
     "monitor_interval": None,      # seconds between resource samples (default: site, 10)
 }
