@@ -150,4 +150,37 @@ assert TAG3 in out
 dprod(site_new, TAG3, "destroy", "--confirm", TAG3)
 assert not os.path.exists(os.path.join(CTL, TAG3)) and not os.path.exists(cdir3)
 print("OK: new campaign keeps bookkeeping + lock under control_root; destroy removes it")
+# 4. as on a full disk at S3DF: the campaign dir refuses writes, even opening the existing
+#    lock file for writing (and renaming the old database)
+TAG4 = "ctltest_full"
+dprod(site_old, TAG4, "init", config(TAG4))
+dprod(site_old, TAG4, "submit", "1", "--limit", "2")
+cdir4 = os.path.join(ROOT, "storage", TAG4)
+lock4 = os.path.join(cdir4, ".dprod.lock")
+os.chmod(lock4, stat.S_IRUSR)
+os.chmod(cdir4, stat.S_IRUSR | stat.S_IXUSR)
+try:
+    out, err = dprod(site_old, TAG4, "status")
+    assert "using a shared lock" in out and "could not update the bookkeeping" in err, (out, err)
+    n = len(PendingScheduler.cancelled)
+    dprod(site_old, TAG4, "cancel", "1")
+    assert len(PendingScheduler.cancelled) == n + 2
+    print("OK: status and cancel work when the lock file cannot be opened for writing")
+    _, err = dprod(site_new, TAG4, "relocate-bookkeeping", rc=1)
+    assert "--keep-old" in err and not os.path.exists(os.path.join(CTL, TAG4, "bookkeeping.sqlite"))
+    stale = K.Campaign(C.load_site(site_new), TAG4)      # e.g. a running watch
+    out, _ = dprod(site_new, TAG4, "relocate-bookkeeping", "--keep-old")
+    assert "left in place" in out and os.path.exists(os.path.join(cdir4, "bookkeeping.sqlite"))
+    assert os.path.exists(os.path.join(CTL, TAG4, "bookkeeping.sqlite"))
+    try:
+        with stale.lock():
+            raise AssertionError("lock taken on the old location after the move")
+    except K.CampaignError as e:
+        assert "start this command again" in str(e), e
+    dprod(site_new, TAG4, "status")                 # new location: writes work again
+    assert statuses(site_new, TAG4)[:2] == ["new"] * 2, statuses(site_new, TAG4)
+    print("OK: relocate-bookkeeping --keep-old moves off a full campaign dir")
+finally:
+    os.chmod(cdir4, stat.S_IRWXU)
+    os.chmod(lock4, stat.S_IRUSR | stat.S_IWUSR)
 print("CONTROL_ROOT TEST OK")

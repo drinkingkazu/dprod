@@ -132,15 +132,28 @@ class Campaign:
         exclude each other (not needed; commands are separate processes).
         """
         path = os.path.join(self.ctl_dir, ".dprod.lock")
-        f = open(path, "a+")
+        mode = fcntl.LOCK_EX
+        try:
+            f = open(path, "a+")
+        except OSError as e:
+            # e.g. a full disk refuses even to open the existing file for writing. A shared
+            # lock needs only a read-only handle and still conflicts with the exclusive lock
+            # of any other dprod, so that one finishes first and none starts meanwhile.
+            if not os.path.exists(path):
+                out("warning: cannot create %s (%s); continuing without lock" % (path, e))
+                f = None
+            else:
+                f = open(path)
+                mode = fcntl.LOCK_SH
+                out("warning: cannot open %s for writing (%s); using a shared lock" % (path, e))
         t0, warned, locked = time.time(), False, False
         try:
-            while True:
+            while f is not None:
                 try:
                     # POSIX (lockf) locks: honored across hosts on parallel filesystems,
                     # so a scrontab round on a compute node and a manual command on
                     # the login node exclude each other (flock is often host-local)
-                    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.lockf(f, mode | fcntl.LOCK_NB)
                     locked = True
                     break
                 except OSError as e:
@@ -156,7 +169,7 @@ class Campaign:
                         out("waiting for campaign lock held by: %s" % f.read().strip())
                         warned = True
                     time.sleep(2)
-            if locked:
+            if locked and mode == fcntl.LOCK_EX:
                 try:        # who holds it, for others' messages; fails on a full disk
                     f.seek(0)
                     f.truncate()
@@ -165,7 +178,8 @@ class Campaign:
                     f.flush()
                 except OSError:
                     pass
-            if not os.path.exists(self.db_path):
+            if not os.path.exists(self.db_path) or \
+                    locate_db(self.site, self.dir, self.tag)[0] != self.db_path:
                 # e.g. a long-running `dprod watch` while relocate-bookkeeping ran
                 raise CampaignError("bookkeeping %s is gone (moved by `dprod relocate-bookkeeping`?);"
                                     " start this command again" % self.db_path)
@@ -173,7 +187,8 @@ class Campaign:
         finally:
             if locked:
                 fcntl.lockf(f, fcntl.LOCK_UN)
-            f.close()
+            if f is not None:
+                f.close()
 
     # ------------------------------------------------------------------ init
     @classmethod
@@ -1129,9 +1144,12 @@ class Campaign:
                 " the next sync that can write records them as cancelled" % e)
         return rows
 
-    def relocate_bookkeeping(self, out=print):
+    def relocate_bookkeeping(self, keep_old=False, out=print):
         """Move bookkeeping.sqlite from the campaign dir to <control_root>/<campaign>/
-        (lock file too). The old file is kept as bookkeeping.sqlite.moved."""
+        (lock file too). The old file is kept as bookkeeping.sqlite.moved.
+
+        keep_old  if the old file cannot be renamed (e.g. on a full disk), leave it in
+                  place: dprod with control_root set uses the new copy anyway"""
         if not self.site.get("control_root") or self.site.get("db_path"):
             raise CampaignError("site %s: set control_root (and no db_path) in %s first"
                                 % (self.site["name"], self.site["_path"]))
@@ -1160,8 +1178,13 @@ class Campaign:
             try:
                 os.rename(old, old + ".moved")
             except OSError as e:
-                os.remove(tmp)
-                raise CampaignError("cannot rename %s (%s); nothing moved" % (old, e))
+                if not keep_old:
+                    os.remove(tmp)
+                    raise CampaignError("cannot rename %s (%s); nothing moved. With --keep-old it"
+                                        " stays in place, unused" % (old, e))
+                out("warning: cannot rename %s (%s); left in place. It is no longer used, but a dprod"
+                    " whose site config has no control_root would still open it: rename it to"
+                    " bookkeeping.sqlite.moved when there is space" % (old, e))
             os.rename(tmp, new_db)
         self.con.close()
         self.db_path, self.ctl_dir = new_db, new_ctl

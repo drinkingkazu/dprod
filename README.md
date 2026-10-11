@@ -395,10 +395,13 @@ If the storage area fills up, running jobs fail, and so does every queued job th
   ```bash
   bin/dprod relocate-bookkeeping     # holds the lock; old file kept as bookkeeping.sqlite.moved
   ```
-  It works on a full disk, since it only writes under `control_root`. Restart a running `dprod watch` afterwards
+  It works on a full disk, since it only writes under `control_root`. If the full disk also refuses to rename the
+  old file, `--keep-old` leaves it in place, unused (rename it to `bookkeeping.sqlite.moved` once there is space).
+  Restart a running `dprod watch` afterwards
   (it stops by itself at its next round). A process whose site config has no `control_root` then refuses
   to open the campaign instead of starting a new, empty bookkeeping.
-* **Without `control_root`,** `status` and `failures` still show the bookkeeping as last recorded (with a
+* **Without `control_root`,** the lock falls back to a shared lock if the full disk refuses to open the lock
+  file for writing (it still keeps out every other dprod). `status` and `failures` still show the bookkeeping as last recorded (with a
   warning), and `cancel` still cancels the elements last known as queued or running. The next sync that can
   write records them as cancelled.
 * **To stop the flood:** `bin/dprod cancel <stage>` (or `cancel` with no stage, for all stages), and stop `watch` or

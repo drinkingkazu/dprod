@@ -437,9 +437,10 @@ def cmd_cancel(a):
 
 def cmd_relocate_bookkeeping(a):
     c = _open(a)
-    old, new = c.relocate_bookkeeping()
-    print("moved the bookkeeping of %s:\n  %s\n  -> %s\n(the old file is kept as %s.moved)"
-          % (c.tag, old, new, old))
+    old, new = c.relocate_bookkeeping(keep_old=a.keep_old)
+    print("moved the bookkeeping of %s:\n  %s\n  -> %s" % (c.tag, old, new))
+    if os.path.exists(old + ".moved"):
+        print("(the old file is kept as %s.moved)" % old)
 
 
 def cmd_reset_attempts(a):
@@ -886,6 +887,8 @@ def build_parser():
 
     p = sub.add_parser("relocate-bookkeeping",
                        help="move bookkeeping.sqlite + lock to the site's control_root")
+    p.add_argument("--keep-old", action="store_true",
+                   help="if the old file cannot be renamed (full disk), leave it in place")
     p.set_defaults(func=cmd_relocate_bookkeeping)
 
     p = sub.add_parser("destroy", help="cancel all jobs of a campaign and delete all its files")
