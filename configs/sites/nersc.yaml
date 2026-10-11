@@ -6,6 +6,7 @@ max_array_size: 1000          # TODO: confirm (MaxArraySize on Perlmutter)
 
 storage_root: /global/cfs/cdirs/TODO_PROJECT/doraemon   # TODO
 log_root: /global/cfs/cdirs/TODO_PROJECT/doraemon/joblog
+#control_root: $HOME/doraemon/control   # bookkeeping.sqlite + lock (default: the campaign dir)
 # Perlmutter compute nodes have no local NVMe; /tmp is RAM-backed (counts
 # against job memory). Use $PSCRATCH if outputs are large.
 work_root: "/tmp"

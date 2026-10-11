@@ -23,7 +23,9 @@ Controls and keeps the books for the multi-stage DORAEMON production:
 * **Seeds**: derived deterministically from `(campaign seed, job id)`. The macro's
   `timeRandomSeed` and the ParticleBomb `SEED: -1` (which means clock-based) are replaced. A retry
   reproduces the same events, and `recover --reseed` gives new ones.
-* **Bookkeeping**: `bookkeeping.sqlite` is written *only* by the controller. Each
+* **Bookkeeping**: `bookkeeping.sqlite` is written *only* by the controller. It lives in the campaign
+  directory, or in `<control_root>/<campaign>/` if the site config sets `control_root` (see
+  [When the storage area is full](#when-the-storage-area-is-full)). Each
   job attempt writes a JSON summary (status, timing, and every `(job, event)`
   in every output file). `dprod sync` merges these with `sacct` states.
 * **Streaming**: a downstream task becomes submittable as soon as all of its
@@ -63,6 +65,7 @@ dprod failures 1 -v             # reasons, slurm ids, log tarballs; for jobs tha
                                 # the worker started (e.g. container failure) the job log's error line
 dprod recover 1                 # resubmit failed tasks (attempt < max_attempts) and cancelled ones
 dprod reset-attempts 1          # start the max_attempts count afresh for failed tasks
+dprod relocate-bookkeeping      # move bookkeeping.sqlite + lock to the site's control_root
 dprod mark 1 17,20-25 --abandon --note "reason"
 dprod lookup 123 45             # all files (every stage/role) holding job 123 event 45
 dprod files 2A -l               # registered outputs with job ranges and event counts
@@ -110,7 +113,7 @@ bin/dprod watch --recover --merge-summary --web   # Ctrl-b d to detach; tmux att
 * **Throttle:** `max_queued: N` in a stage of the campaign config keeps at most N array elements of that stage
   queued or running. `submit`, `recover`, `advance` and `watch` all honor it; `--max-queued N` on any of them
   overrides it for that command. This lets a 5000-job campaign go in gradually.
-* **Lock:** every command that changes the bookkeeping takes a campaign lock (`<campaign>/.dprod.lock`).
+* **Lock:** every command that changes the bookkeeping takes a campaign lock (`.dprod.lock`, next to `bookkeeping.sqlite`).
   A manual `submit` while `watch` runs waits for its turn, so the same task can't be submitted twice.
   It uses POSIX locks on the shared filesystem, so it also works across nodes (e.g. a scrontab round vs. sdfiana).
 
@@ -379,6 +382,28 @@ dprod submit 1 --partition roma --account neutrino:other   # or: dprod advance /
   They apply to those submissions only; the site config is unchanged. Each manifest records the overrides it used.
 * **For good:** to change it permanently, edit the profile in `configs/sites/<site>.yaml`. The next submission uses it.
 
+## When the storage area is full
+
+If the storage area fills up, running jobs fail, and so does every queued job that starts afterwards.
+
+* **Keep the controller's files elsewhere:** set `control_root` in the site config to a directory on another
+  filesystem (with its own quota). `bookkeeping.sqlite` and the lock then go to `<control_root>/<campaign>/`, so
+  `dprod status`, `failures` and `cancel` keep working when the storage area is full. It must be shared, like
+  the storage area: a scrontab round on a compute node uses the same lock as commands on sdfiana.
+  New campaigns use it from `dprod init` on.
+* **Existing campaigns** keep their bookkeeping in the campaign directory until you move it:
+  ```bash
+  bin/dprod relocate-bookkeeping     # holds the lock; old file kept as bookkeeping.sqlite.moved
+  ```
+  It works on a full disk, since it only writes under `control_root`. Restart a running `dprod watch` afterwards
+  (it stops by itself at its next round). A process whose site config has no `control_root` then refuses
+  to open the campaign instead of starting a new, empty bookkeeping.
+* **Without `control_root`,** `status` and `failures` still show the bookkeeping as last recorded (with a
+  warning), and `cancel` still cancels the elements last known as queued or running. The next sync that can
+  write records them as cancelled.
+* **To stop the flood:** `bin/dprod cancel <stage>` (or `cancel` with no stage, for all stages), and stop `watch` or
+  `dprod-cron` so they don't resubmit. Once there is space again, `dprod recover` resubmits the failed tasks.
+
 ## Running at S3DF (first test)
 
 1. **Put the repo on S3DF**, somewhere under `/sdf` so that jobs can see it:
@@ -575,7 +600,7 @@ configs/edepsim/                        stage-1 inputs (geometry, macro, generat
 tests/run_local_test.sh                 end-to-end test with the local scheduler
 ```
 
-Campaign directory: `campaign.yaml` (frozen config), `bookkeeping.sqlite`,
+Campaign directory: `campaign.yaml` (frozen config), `bookkeeping.sqlite` (unless the site sets `control_root`),
 `code/` (worker code snapshot; `dprod refresh-code` to update),
 `inputs/<stage>/`, `submissions/<stage>/sub_NNNNN.{json,sh}`,
 `summaries/<stage>/`, `logs/<stage>/*.tgz`, `data/<stage>/jNNNNNN/` (shards of 1000 jobs).

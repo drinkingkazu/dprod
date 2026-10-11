@@ -24,7 +24,9 @@ SITE_DEFAULTS = {
     "scheduler": "slurm",          # slurm | local
     "max_array_size": 100,
     "monitor_interval": 10,        # seconds between resource samples in jobs
-    "db_path": None,               # default: <campaign_dir>/bookkeeping.sqlite
+    "control_root": None,          # controller-only files (bookkeeping.sqlite, lock) go to
+                                   # <control_root>/<campaign>/; default: the campaign dir
+    "db_path": None,               # default: <control dir>/bookkeeping.sqlite
     "work_root": "/tmp",           # expanded on the compute node
     "container": {"exec": "{image}", "flags": ""},
     "images": {},
@@ -116,7 +118,8 @@ def load_site(name_or_path, check_paths=True):
     site["storage_root"] = _expand(site["storage_root"])
     site["log_root"] = _expand(site["log_root"])
     site["db_path"] = _expand(site["db_path"])
-    for key in ("storage_root", "log_root", "db_path"):
+    site["control_root"] = _expand(site["control_root"])
+    for key in ("storage_root", "log_root", "db_path", "control_root"):
         if check_paths and site[key] and "$" in site[key]:
             raise ConfigError("site %s: %s=%r has an undefined environment variable" % (
                 site["name"], key, site[key]))

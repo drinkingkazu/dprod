@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -25,6 +26,10 @@ class CampaignError(Exception):
     pass
 
 
+# writes that fail when the disk holding the bookkeeping is full (or read-only)
+WRITE_ERRORS = (sqlite3.OperationalError, OSError)
+
+
 def _span(ids):
     if not ids:
         return ""
@@ -37,10 +42,33 @@ def campaign_dir(site, tag):
     return os.path.join(site["storage_root"], tag)
 
 
+def control_dir(site, tag):
+    """Where the controller-only files (bookkeeping.sqlite, .dprod.lock) live:
+    <control_root>/<campaign>/ if the site sets control_root (so that a full
+    storage area does not stop `dprod status` / `cancel`), else the campaign dir."""
+    if site.get("control_root"):
+        return os.path.join(site["control_root"], tag)
+    return campaign_dir(site, tag)
+
+
 def _db_path(site, cdir, tag):
     if site.get("db_path"):
         return site["db_path"].format(campaign=tag)
+    if site.get("control_root"):
+        return os.path.join(site["control_root"], tag, "bookkeeping.sqlite")
     return os.path.join(cdir, "bookkeeping.sqlite")
+
+
+def locate_db(site, cdir, tag):
+    """(bookkeeping db, lock dir) of a campaign. A campaign made before the site set
+    control_root keeps its bookkeeping in the campaign dir until
+    `dprod relocate-bookkeeping` moves it."""
+    db = _db_path(site, cdir, tag)
+    legacy = os.path.join(cdir, "bookkeeping.sqlite")
+    if site.get("control_root") and not site.get("db_path") and \
+            not os.path.exists(db) and os.path.exists(legacy):
+        return legacy, cdir
+    return db, control_dir(site, tag)
 
 
 def _snapshot_code(cdir):
@@ -79,7 +107,14 @@ class Campaign:
         if not os.path.exists(cfg_path):
             raise CampaignError("campaign %s is not initialized at %s" % (tag, self.dir))
         self.cfg = C.load_campaign(cfg_path, site)
-        self.db_path = _db_path(site, self.dir, tag)
+        self.db_path, self.ctl_dir = locate_db(site, self.dir, tag)
+        if not os.path.exists(self.db_path):
+            hint = ""
+            legacy = os.path.join(self.dir, "bookkeeping.sqlite")
+            if os.path.exists(legacy + ".moved"):
+                hint = ("; it was moved by `dprod relocate-bookkeeping` (see %s.moved): set the"
+                        " site's control_root accordingly" % legacy)
+            raise CampaignError("campaign %s: bookkeeping %s not found%s" % (tag, self.db_path, hint))
         self.con = D.connect(self.db_path)
         self.sched = get_scheduler(site, self.dir)
         # one-off slurm option overrides for submissions made by this process
@@ -96,7 +131,7 @@ class Campaign:
         POSIX locks are per process: two Campaign objects in one process do not
         exclude each other (not needed; commands are separate processes).
         """
-        path = os.path.join(self.dir, ".dprod.lock")
+        path = os.path.join(self.ctl_dir, ".dprod.lock")
         f = open(path, "a+")
         t0, warned, locked = time.time(), False, False
         try:
@@ -122,11 +157,18 @@ class Campaign:
                         warned = True
                     time.sleep(2)
             if locked:
-                f.seek(0)
-                f.truncate()
-                f.write("pid %d on %s since %s\n" % (os.getpid(), socket.gethostname(),
-                                                   time.strftime("%Y-%m-%d %H:%M:%S")))
-                f.flush()
+                try:        # who holds it, for others' messages; fails on a full disk
+                    f.seek(0)
+                    f.truncate()
+                    f.write("pid %d on %s since %s\n" % (os.getpid(), socket.gethostname(),
+                                                       time.strftime("%Y-%m-%d %H:%M:%S")))
+                    f.flush()
+                except OSError:
+                    pass
+            if not os.path.exists(self.db_path):
+                # e.g. a long-running `dprod watch` while relocate-bookkeeping ran
+                raise CampaignError("bookkeeping %s is gone (moved by `dprod relocate-bookkeeping`?);"
+                                    " start this command again" % self.db_path)
             yield
         finally:
             if locked:
@@ -161,6 +203,8 @@ class Campaign:
         else:
             shutil.copyfile(cfg_path, os.path.join(cdir, "campaign.yaml"))
         dbp = _db_path(site, cdir, tag)
+        os.makedirs(os.path.dirname(dbp), exist_ok=True)
+        os.makedirs(control_dir(site, tag), exist_ok=True)
         con = D.create(dbp, {"campaign": tag, "site": site["name"], "created": D.now(),
                              "config_source": os.path.abspath(cfg_path)})
         con.close()
@@ -349,7 +393,7 @@ class Campaign:
             by_src.setdefault((s["external"], s["external_dir"]), []).append(s)
         with self.con:
             for (tag, src_dir), stages in by_src.items():
-                dbp = _db_path(self.site, src_dir, tag)
+                dbp = locate_db(self.site, src_dir, tag)[0]
                 try:
                     src = sqlite3.connect("file:%s?mode=ro" % dbp, uri=True, timeout=60)
                 except sqlite3.Error as e:
@@ -934,6 +978,8 @@ class Campaign:
         if not os.path.realpath(wd).startswith(os.path.realpath(self.dir) + os.sep) and \
                 self.tag in os.path.realpath(wd).split(os.sep):
             paths.append(wd)          # a separate, campaign-specific web directory
+        if os.path.realpath(self.ctl_dir) != os.path.realpath(self.dir):
+            paths.append(self.ctl_dir)
         if self.site.get("db_path"):
             paths.append(self.db_path)
         out = []
@@ -1052,26 +1098,75 @@ class Campaign:
             rows = [r for r in rows if (r["sched_state"] or "PENDING") == "PENDING"]
         return rows
 
-    def cancel(self, stage=None, task_ids=None, queued_only=False):
+    def cancel(self, stage=None, task_ids=None, queued_only=False, out=print):
         """scancel active array elements; their tasks go back to 'new' (ready to be
         submitted again, e.g. with other slurm settings) and the cancelled attempt
-        does not count toward max_attempts."""
-        self.sync()
+        does not count toward max_attempts.
+
+        If the bookkeeping cannot be written (e.g. its disk is full), the elements
+        known as active are still cancelled; a later sync records them as cancelled."""
+        try:
+            self.sync()
+        except WRITE_ERRORS as e:
+            out("warning: sync failed (%s); cancelling the elements last known as active" % e)
         rows = self._selected_active(stage, task_ids, queued_only)
         by_array = {}
         for r in rows:
             by_array.setdefault(r["array_job_id"], []).append(r["array_index"])
         for jid, idx in by_array.items():
             self.sched.cancel(jid, idx)
-        with self.con:
-            for r in rows:
-                self.con.execute(
-                    "UPDATE attempts SET state = 'cancelled', reason = 'cancelled by user'"
-                    " WHERE stage = ? AND task_id = ? AND attempt = ?",
-                    (r["stage"], r["task_id"], r["attempt"]))
-                D.set_task_status(self.con, r["stage"], r["task_id"], D.NEW,
-                                  note="attempt %d cancelled by user" % r["attempt"])
+        try:
+            with self.con:
+                for r in rows:
+                    self.con.execute(
+                        "UPDATE attempts SET state = 'cancelled', reason = 'cancelled by user'"
+                        " WHERE stage = ? AND task_id = ? AND attempt = ?",
+                        (r["stage"], r["task_id"], r["attempt"]))
+                    D.set_task_status(self.con, r["stage"], r["task_id"], D.NEW,
+                                      note="attempt %d cancelled by user" % r["attempt"])
+        except WRITE_ERRORS as e:
+            out("warning: cancelled in slurm, but the bookkeeping was not updated (%s);"
+                " the next sync that can write records them as cancelled" % e)
         return rows
+
+    def relocate_bookkeeping(self, out=print):
+        """Move bookkeeping.sqlite from the campaign dir to <control_root>/<campaign>/
+        (lock file too). The old file is kept as bookkeeping.sqlite.moved."""
+        if not self.site.get("control_root") or self.site.get("db_path"):
+            raise CampaignError("site %s: set control_root (and no db_path) in %s first"
+                                % (self.site["name"], self.site["_path"]))
+        new_db, new_ctl = _db_path(self.site, self.dir, self.tag), control_dir(self.site, self.tag)
+        if os.path.realpath(self.db_path) == os.path.realpath(new_db):
+            raise CampaignError("bookkeeping is already in %s" % new_ctl)
+        if os.path.exists(new_db):
+            raise CampaignError("%s exists already; remove it or set another control_root" % new_db)
+        os.makedirs(new_ctl, exist_ok=True)
+        old, tmp = self.db_path, new_db + ".tmp"
+        with self.lock(out=out):        # the old lock: processes still using the old location
+            dst = sqlite3.connect(tmp)
+            if hasattr(self.con, "backup"):           # python >= 3.7
+                self.con.backup(dst)
+            else:       # no other writer (we hold the lock) and no open transaction: copy
+                self.con.execute("SELECT COUNT(*) FROM meta").fetchone()   # rolls back a hot journal
+                dst.close()
+                shutil.copyfile(old, tmp)
+                dst = sqlite3.connect(tmp)
+            ok = dst.execute("PRAGMA quick_check").fetchone()[0]
+            dst.close()
+            if ok != "ok":
+                os.remove(tmp)
+                raise CampaignError("copy of the bookkeeping failed its check (%s); nothing moved" % ok)
+            # old first: from here on no process can open the old location
+            try:
+                os.rename(old, old + ".moved")
+            except OSError as e:
+                os.remove(tmp)
+                raise CampaignError("cannot rename %s (%s); nothing moved" % (old, e))
+            os.rename(tmp, new_db)
+        self.con.close()
+        self.db_path, self.ctl_dir = new_db, new_ctl
+        self.con = D.connect(new_db)
+        return old, new_db
 
     MOVABLE = {"partition": "Partition", "account": "Account", "qos": "QOS", "time": "TimeLimit"}
 

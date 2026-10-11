@@ -29,7 +29,7 @@ import time
 from . import config as C
 from . import db as D
 from . import layout as L
-from .campaign import Campaign, CampaignError, _span
+from .campaign import WRITE_ERRORS, Campaign, CampaignError, _span
 from .report import print_failures, print_status
 from .scheduler import SchedulerError
 
@@ -52,7 +52,8 @@ def parse_ids(text):
 
 
 # commands that only read bookkeeping; everything else holds the campaign lock
-READ_ONLY = ("lookup", "files", "tasks", "watch", "sites", "configs", "campaigns", "use")
+READ_ONLY = ("lookup", "files", "tasks", "watch", "sites", "configs", "campaigns", "use",
+             "relocate-bookkeeping")      # (takes the lock itself)
 
 
 def _slurm_override(a):
@@ -385,17 +386,27 @@ def cmd_sync(a):
         sum(counts.values()), ", ".join("%s=%d" % kv for kv in sorted(counts.items())) or "-"))
 
 
+def _sync_or_warn(c):
+    """Sync for read-mostly commands; if the bookkeeping cannot be written (e.g. its
+    disk is full), go on with what it last recorded."""
+    try:
+        c.sync()
+    except WRITE_ERRORS as e:
+        print("warning: could not update the bookkeeping (%s); showing it as last recorded."
+              " If its disk is full, see `dprod relocate-bookkeeping`" % e, file=sys.stderr)
+
+
 def cmd_status(a):
     c = _open(a)
     if not a.no_sync:
-        c.sync()
+        _sync_or_warn(c)
     print_status(c)
 
 
 def cmd_failures(a):
     c = _open(a)
     if not a.no_sync:
-        c.sync()
+        _sync_or_warn(c)
     for stage in _stages(c, a.stage):
         print_failures(c, stage, verbose=a.verbose)
 
@@ -422,6 +433,13 @@ def cmd_cancel(a):
             st, len(ids), "queued" if a.queued else "queued/running", _span(sorted(ids))))
     if rows:
         print("resubmit with e.g.: dprod submit <stage> --partition P --account A   (or dprod advance ...)")
+
+
+def cmd_relocate_bookkeeping(a):
+    c = _open(a)
+    old, new = c.relocate_bookkeeping()
+    print("moved the bookkeeping of %s:\n  %s\n  -> %s\n(the old file is kept as %s.moved)"
+          % (c.tag, old, new, old))
 
 
 def cmd_reset_attempts(a):
@@ -568,8 +586,10 @@ def cmd_check(a):
         tools.append(exe[0])
     for t in tools:
         report(shutil.which(t), "command %s" % t, shutil.which(t) or "not on PATH")
-    for key in ("storage_root", "log_root"):
+    for key in ("storage_root", "log_root", "control_root"):
         d = site[key]
+        if not d:
+            continue
         try:
             os.makedirs(d, exist_ok=True)
             probe = os.path.join(d, ".dprod_write_test")
@@ -863,6 +883,10 @@ def build_parser():
     p.add_argument("--rebuild", action="store_true",
                    help="rewrite the stage-1 merged file from scratch")
     p.set_defaults(func=cmd_merge_summary)
+
+    p = sub.add_parser("relocate-bookkeeping",
+                       help="move bookkeeping.sqlite + lock to the site's control_root")
+    p.set_defaults(func=cmd_relocate_bookkeeping)
 
     p = sub.add_parser("destroy", help="cancel all jobs of a campaign and delete all its files")
     p.add_argument("--confirm", metavar="TAG", help="the campaign tag, to confirm without a prompt")

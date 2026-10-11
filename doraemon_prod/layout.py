@@ -17,7 +17,8 @@ Campaign directory (on shared storage)
 --------------------------------------
     <storage_root>/<campaign>/
         campaign.yaml          frozen campaign configuration
-        bookkeeping.sqlite     written only by the controller
+        bookkeeping.sqlite     written only by the controller (in <control_root>/<campaign>/
+                               instead if the site sets control_root)
         code/                  snapshot of this package used by the workers
         inputs/<stage>/        snapshot of stage input files (macros, yaml...)
         submissions/<stage>/   array manifests (JSON) and sbatch scripts

@@ -97,7 +97,8 @@ def list_campaigns(site):
     out = []
     for cfg in glob.glob(os.path.join(root, "*", "campaign.yaml")):
         d = os.path.dirname(cfg)
-        db = os.path.join(d, "bookkeeping.sqlite")
+        from .campaign import locate_db
+        db = locate_db(site, d, os.path.basename(d))[0]
         info = {"tag": os.path.basename(d), "dir": d, "stages": [],
                 "active": os.path.getmtime(db) if os.path.exists(db) else os.path.getmtime(cfg)}
         try:

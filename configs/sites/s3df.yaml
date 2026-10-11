@@ -5,6 +5,9 @@ max_array_size: 100          # S3DF limit; larger submissions are split into sev
 
 storage_root: /sdf/data/neutrino/doraemon      # campaign dirs: <storage_root>/<campaign>/
 log_root: /sdf/group/neutrino/doraemon/joblog  # slurm logs: <log_root>/<campaign>/<stage>/
+# bookkeeping.sqlite + lock: <control_root>/<campaign>/; off the storage filesystem, so that
+# `dprod status` / `cancel` work when storage is full (default: the campaign dir)
+#control_root: /sdf/group/neutrino/doraemon/control
 work_root: "$LSCRATCH"                         # per-job local NVMe, expanded on the node
 keep_failed_workdir: false
 
