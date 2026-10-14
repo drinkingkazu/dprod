@@ -23,8 +23,10 @@ os.environ["DPROD_BATCH"] = "1"          # no confirmation prompts in tests
 
 
 class Deferred(LocalScheduler):
-    """Submitted elements stay PENDING; cancel marks them CANCELLED."""
+    """Submitted elements stay PENDING; cancel marks them CANCELLED (or, with stubborn,
+    RUNNING: a job that takes long to die)."""
     cancelled = []
+    stubborn = False
 
     def submit(self, script, n_tasks, max_concurrent=None):
         jid = str(int(time.time() * 1e6) % 10**10)
@@ -38,7 +40,7 @@ class Deferred(LocalScheduler):
         st = json.load(open(p))
         for k in st:
             if indices is None or int(k) in indices:
-                st[k]["state"] = "CANCELLED"
+                st[k]["state"] = "RUNNING" if Deferred.stubborn else "CANCELLED"
                 Deferred.cancelled.append((jid, int(k)))
         json.dump(st, open(p, "w"))
 
@@ -105,4 +107,27 @@ assert not os.path.exists(os.path.join(ROOT, "storage", "sharedweb"))
 assert os.path.isdir(os.path.join(ROOT, "www_shared"))                   # not campaign-specific
 print("OK: a shared web directory (no campaign tag in its path) is kept")
 assert d(site_a, "desttest", "status") == 1                              # gone
+
+# a job that does not stop: nothing is deleted, also not by a second try (the attempt is
+# already 'cancelled' in the bookkeeping by then); once slurm reports it gone, destroy works
+mk("slowdeath", site_a)
+sdir = os.path.join(ROOT, "storage", "slowdeath")
+Deferred.stubborn = True
+for _ in range(2):
+    c = K.Campaign(C.load_site(site_a), "slowdeath")
+    try:
+        c.destroy(wait_s=0, out=print)
+        raise AssertionError("destroyed while jobs were still running")
+    except K.CampaignError as e:
+        assert "still not stopped" in str(e), e
+    assert os.path.isdir(sdir)
+Deferred.stubborn = False
+for fn in os.listdir(os.path.join(sdir, "local_sched")):        # slurm finally kills them
+    if fn.endswith(".json"):
+        p = os.path.join(sdir, "local_sched", fn)
+        st = json.load(open(p))
+        json.dump({k: dict(v, state="CANCELLED") for k, v in st.items()}, open(p, "w"))
+assert d(site_a, "slowdeath", "destroy", "--confirm", "slowdeath") == 0
+assert not os.path.exists(sdir)
+print("OK: destroy waits until slurm has stopped the cancelled jobs")
 print("DESTROY TEST OK")

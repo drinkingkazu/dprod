@@ -196,6 +196,17 @@ def normalize_campaign(cfg, source="<campaign>"):
     cfg.setdefault("description", "")
     cfg.setdefault("seed", 0)
     cfg.setdefault("max_attempts", 3)
+    from .storage import DEFAULTS as STORAGE_DEFAULTS, parse_size
+    cfg["storage"] = dict(STORAGE_DEFAULTS, **(cfg.get("storage") or {}))
+    unknown = set(cfg["storage"]) - set(STORAGE_DEFAULTS)
+    if unknown:
+        raise ConfigError("%s: unknown storage option(s) %s (known: %s)" % (
+            source, ", ".join(sorted(unknown)), ", ".join(STORAGE_DEFAULTS)))
+    for key in ("limit", "min_free"):
+        try:
+            parse_size(cfg["storage"][key])
+        except ValueError as e:
+            raise ConfigError("%s: storage.%s: %s" % (source, key, e))
     raw_stages = cfg.get("stages") or {}
     if not raw_stages:
         raise ConfigError("%s: no stages defined" % source)

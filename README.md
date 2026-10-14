@@ -65,6 +65,7 @@ dprod failures 1 -v             # reasons, slurm ids, log tarballs; for jobs tha
                                 # the worker started (e.g. container failure) the job log's error line
 dprod recover 1                 # resubmit failed tasks (attempt < max_attempts) and cancelled ones
 dprod reset-attempts 1          # start the max_attempts count afresh for failed tasks
+dprod reset-stage 3B            # delete a stage's (and downstream) outputs to run it again
 dprod relocate-bookkeeping      # move bookkeeping.sqlite + lock to the site's control_root
 dprod mark 1 17,20-25 --abandon --note "reason"
 dprod lookup 123 45             # all files (every stage/role) holding job 123 event 45
@@ -113,6 +114,25 @@ bin/dprod watch --recover --merge-summary --web   # Ctrl-b d to detach; tmux att
 * **Throttle:** `max_queued: N` in a stage of the campaign config keeps at most N array elements of that stage
   queued or running. `submit`, `recover`, `advance` and `watch` all honor it; `--max-queued N` on any of them
   overrides it for that command. This lets a 5000-job campaign go in gradually.
+* **Storage budget:** a `storage:` block in the campaign config keeps submissions within what the storage area can
+  hold (all optional; `update-config` applies changes to a running campaign):
+  ```yaml
+  storage:
+    limit: 40T          # what this campaign's files may occupy in total
+    min_free: 2T        # keep this much free on the storage filesystem (as `df` shows it)
+    probe_jobs: 3       # per stage: tasks allowed out before a finished one gives a size estimate
+    cancel_queued: true # advance/watch cancel pending elements that would not fit
+  ```
+  Each stage's per-task estimate is the mean size of its finished tasks' outputs, plus their logs and summaries,
+  plus 10%. Jobs copy outputs to storage when they finish, so every queued or running element reserves one
+  estimate. Until a stage has a finished task, at most `probe_jobs` of its tasks are queued or running.
+  `submit`, `recover`, `advance` and `watch` submit only what fits in
+  `min(limit - used, free - min_free) - reserved`, giving downstream stages priority (they turn existing outputs
+  into results). If the room becomes negative (the limit was lowered, other users filled the filesystem, outputs
+  grew), `advance`/`watch` cancel pending elements, upstream stages and highest task ids first. Cancellations don't
+  use attempts, and the tasks go out again once there is room. `dprod status` shows used, free, reserved and the
+  estimates. `limit` counts registered outputs plus attempt logs/summaries, not the merged summary HDF5 files, so
+  leave some margin, or use `min_free`, which measures the filesystem itself.
 * **Lock:** every command that changes the bookkeeping takes a campaign lock (`.dprod.lock`, next to `bookkeeping.sqlite`).
   A manual `submit` while `watch` runs waits for its turn, so the same task can't be submitted twice.
   It uses POSIX locks on the shared filesystem, so it also works across nodes (e.g. a scrontab round vs. sdfiana).
@@ -211,6 +231,27 @@ stages:
 The alternative is to stay within one campaign: add a stage (e.g. `supera_wire_v2` with parent `jaxtpc_wire`) with
 `dprod update-config`.
 
+## Re-running a stage (reset-stage)
+
+To run a stage again from scratch within the campaign, e.g. after fixing its command:
+```bash
+bin/dprod update-config configs/campaigns/<campaign>.yaml   # if the stage's definition changed
+bin/dprod reset-stage 3B --dry-run      # stages, tasks, paths + sizes, jobs to cancel
+bin/dprod reset-stage 3B                # asks you to type the stage name (or --confirm 3B)
+bin/dprod submit 3B                     # or let watch / dprod-cron pick the tasks up
+```
+* **Downstream too:** the stages below it are reset as well (`reset-stage 2B` also resets 3B), so no output is
+  left that was made from deleted inputs. Upstream stages are untouched.
+* **What it does:** cancels the stages' queued/running jobs and waits until slurm has stopped them (as `destroy`
+  does; after 10 minutes it gives up and deletes nothing), so a dying job can't write after the deletion. Then it unregisters their files and (job, event) records, and puts their tasks back
+  to *new* with a fresh `max_attempts` count. Finally it deletes `data/<stage>/` (registered outputs and any
+  leftovers) and the stage's merged summary file. Abandoned tasks stay abandoned.
+* **Kept:** the attempt history, logs and per-attempt summaries (`dprod failures`/`tasks` still show earlier attempts).
+* **Protected:** it refuses if another campaign inherits one of these stages (it would lose its inputs) unless you add
+  `--allow-inherited`, and production tags (`prod_*`) need `--allow-production`.
+* **To keep the old outputs** until the new ones are validated, add a new stage or a derived campaign instead
+  (see above).
+
 ## Destroying a campaign
 
 ```bash
@@ -218,8 +259,9 @@ bin/dprod destroy --dry-run            # what would be deleted (paths, sizes) an
 bin/dprod destroy                      # asks you to type the campaign tag
 bin/dprod destroy --confirm <tag>      # non-interactive
 ```
-It cancels the campaign's queued and running jobs first and waits until they have stopped, so dying jobs don't write
-files back. Then it deletes:
+It cancels the campaign's queued and running jobs first and waits until slurm reports them stopped (also jobs
+cancelled earlier that slurm still showed as active), so dying jobs don't write files back. If they haven't stopped
+after 10 minutes, it deletes nothing; check `squeue` and run it again. Then it deletes:
 * the campaign directory: data, database, summaries, logs, records, code and inputs snapshots, and the default web page;
 * the campaign's slurm log directory;
 * a separate web directory, but only if its path contains the campaign tag (`web.dir: .../{campaign}`).

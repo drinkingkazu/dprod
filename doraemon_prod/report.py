@@ -81,6 +81,9 @@ def print_status(c, out=print):
             "%s/%s" % ("%.0f%%" % r["gpu_util_pct"], _fmt_mb(r["gpu_mem_mb"]))
             if r["gpu_util_pct"] is not None else "-", _fmt_s(r["t_min"]), _fmt_s(r["t_mean"]), _fmt_s(r["t_max"])))
     out("")
+    from .storage import Budget
+    for line in Budget(c).lines():
+        out(line)
     exts = sorted(set(s["external"] for s in c.cfg["stages"].values() if s.get("external")))
     if exts:
         out("*: inherited from campaign %s (read-only here; imported at every sync)" % ", ".join(exts))

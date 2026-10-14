@@ -277,6 +277,13 @@ def _do_submit(a, recovery):
     if cap is not None and limit == room and len(entries) == limit:
         print("%s: max_queued %d (%d queued/running): submitting at most %d task(s)"
               % (stage, int(cap), active, limit))
+    if entries:
+        from .storage import Budget
+        trimmed = Budget(c).trim([(stage, recovery, entries)])
+        entries = trimmed[0][2] if trimmed else []
+        if not entries:
+            print("%s: nothing submitted: no room in the storage budget (dprod status)" % stage)
+            return
     if entries and not confirm_plan(c, [(stage, recovery, entries)], a):
         return
     res = c.submit(stage, recovery=recovery, dry_run=a.dry_run, entries=entries) if entries else []
@@ -307,7 +314,9 @@ def cmd_advance(a):
     c = _open(a)
     c.slurm_override = _slurm_override(a)
     stages = _stages(c, a.stages) if a.stages else None
-    plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued)
+    c.sync()
+    c.storage_cancel(dry_run=a.dry_run)
+    plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued, sync=False)
     if not plan:
         print("nothing ready to submit")
     elif confirm_plan(c, plan, a):
@@ -335,7 +344,10 @@ def cmd_watch(a):
             rounds += 1
             print("\n=== %s round %d" % (time.strftime("%Y-%m-%d %H:%M:%S"), rounds))
             with c.lock():
-                plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued)
+                c.sync()
+                c.storage_cancel()
+                plan = c.plan_advance(stages, recover=a.recover, max_queued=a.max_queued,
+                                      sync=False)
                 if plan:
                     print_plan(c, plan)          # unattended: logged, not asked
                 res = c.advance(recover=a.recover, plan=plan)
@@ -704,6 +716,42 @@ def cmd_destroy(a):
     print("campaign %s destroyed" % c.tag)
 
 
+def cmd_reset_stage(a):
+    c = _open(a)
+    stage = C.resolve_stage(c.cfg, a.stage)
+    if c.tag.startswith("prod_") and not a.allow_production:
+        raise CampaignError("%s is a production tag; add --allow-production to reset its stages" % c.tag)
+    plan = c.reset_stage_plan(stage)
+    names = ", ".join("%s [%s]" % (st, c.cfg["stages"][st]["alias"]) if c.cfg["stages"][st]["alias"]
+                      else st for st in plan["stages"])
+    print("reset %s in campaign %s -- outputs are deleted, it cannot be undone:" % (names, c.tag))
+    for st in plan["stages"]:
+        print("  %-18s %d task(s) back to 'new' (abandoned ones stay abandoned)" % (st, plan["tasks"][st]))
+    for p, size in plan["paths"]:
+        print("  %10s  %s" % (_human(size), p))
+    print("  %d queued/running array element(s) will be cancelled first" % len(plan["active"]))
+    for tag, st in plan["inherited_by"]:
+        print("  WARNING: campaign %s inherits %s from here and would lose its inputs" % (tag, st))
+    if a.dry_run:
+        print("[dry-run] nothing changed")
+        return
+    if plan["inherited_by"] and not a.allow_inherited:
+        raise CampaignError("other campaigns inherit these stages; add --allow-inherited to reset anyway")
+    if a.confirm is None:
+        if not sys.stdin.isatty():
+            raise CampaignError("not a terminal: pass --confirm %s to reset non-interactively" % stage)
+        a.confirm = input("type the stage name (%s) to confirm: " % stage).strip()
+    if a.confirm not in (stage, c.cfg["stages"][stage]["alias"]):
+        raise CampaignError("confirmation %r does not match %r; nothing changed" % (a.confirm, stage))
+    _, removed = c.reset_stage(stage, allow_inherited=a.allow_inherited)
+    for p, size, errors in removed:
+        print("removed %s (%s)%s" % (p, _human(size),
+                                     "; %d path(s) could not be removed, e.g. %s" % (len(errors), errors[0])
+                                     if errors else ""))
+    print("reset done; the tasks are 'new': `dprod submit %s` (or watch / dprod-cron) runs them again"
+          % a.stage)
+
+
 def cmd_update_config(a):
     c = _open(a)
     changes = c.update_config(a.config, dry_run=a.dry_run)
@@ -884,6 +932,16 @@ def build_parser():
     p.add_argument("--rebuild", action="store_true",
                    help="rewrite the stage-1 merged file from scratch")
     p.set_defaults(func=cmd_merge_summary)
+
+    p = sub.add_parser("reset-stage",
+                       help="delete a stage's outputs (and its downstream stages') to run it again")
+    p.add_argument("stage", help="stage name or alias; stages below it are reset too")
+    p.add_argument("--dry-run", action="store_true", help="only show what would be reset/deleted")
+    p.add_argument("--confirm", metavar="STAGE", help="the stage name or alias, to confirm without a prompt")
+    p.add_argument("--allow-inherited", action="store_true",
+                   help="reset even if other campaigns inherit these stages")
+    p.add_argument("--allow-production", action="store_true", help="required for tags starting with prod_")
+    p.set_defaults(func=cmd_reset_stage)
 
     p = sub.add_parser("relocate-bookkeeping",
                        help="move bookkeeping.sqlite + lock to the site's control_root")

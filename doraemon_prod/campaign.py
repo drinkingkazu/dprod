@@ -3,6 +3,7 @@
 import contextlib
 import errno
 import fcntl
+import glob
 import json
 import os
 import shlex
@@ -24,6 +25,19 @@ TEMPLATE = os.path.join(C.REPO_DIR, "templates", "sbatch.sh.in")
 
 class CampaignError(Exception):
     pass
+
+
+def _tree_size(p):
+    if not os.path.isdir(p):
+        return os.path.getsize(p)
+    size = 0
+    for root, _, files in os.walk(p):
+        for fn in files:
+            try:
+                size += os.lstat(os.path.join(root, fn)).st_size
+            except OSError:
+                pass
+    return size
 
 
 # writes that fail when the disk holding the bookkeeping is full (or read-only)
@@ -290,7 +304,7 @@ class Campaign:
         if new["seed"] != cur["seed"] and any(ran.values()):
             errors.append("seed: %s -> %s refused: jobs already ran with seeds derived from it"
                           % (cur["seed"], new["seed"]))
-        for key in ("description", "max_attempts", "seed"):
+        for key in ("description", "max_attempts", "seed", "storage"):
             if new.get(key) != cur.get(key):
                 changes.append("%s: %r -> %r" % (key, cur.get(key), new.get(key)))
 
@@ -553,9 +567,11 @@ class Campaign:
         entries = self.candidates(stage, recovery, task_ids, force, reseed)
         return entries[:limit] if limit is not None else entries
 
-    def plan_advance(self, stages=None, recover=False, max_queued=None):
-        """What `advance` would submit now: [(stage, recovery, entries)], nothing submitted."""
-        self.sync()
+    def plan_advance(self, stages=None, recover=False, max_queued=None, out=print, sync=True):
+        """What `advance` would submit now: [(stage, recovery, entries)], nothing submitted.
+        Within max_queued and the storage budget (see storage.py)."""
+        if sync:
+            self.sync()
         items = []
         for stage in stages or list(self.cfg["stages"]):
             s = self.cfg["stages"][stage]
@@ -573,7 +589,33 @@ class Campaign:
                 if entries:
                     items.append((stage, recovery, entries))
                     n += len(entries)
-        return items
+        from .storage import Budget
+        return Budget(self).trim(items, out=out)
+
+    def storage_cancel(self, dry_run=False, out=print):
+        """Cancel pending elements whose reserved output no longer fits the storage
+        budget (storage.cancel_queued). Returns the cancelled attempt rows."""
+        from .storage import Budget, fmt
+        b = Budget(self)
+        rows = b.to_cancel() if b.cancel_queued else []
+        if not rows:
+            if b.enabled and b.headroom < 0:
+                out("storage: %s over budget; nothing pending that could be cancelled"
+                    % fmt(-b.headroom))
+            return []
+        by = {}
+        for r in rows:
+            by.setdefault(r["stage"], []).append(r["task_id"])
+        out("storage: %s over budget: %scancelling %s" % (
+            fmt(-b.headroom), "[dry-run] not " if dry_run else "",
+            "; ".join("%s %d pending task(s) [%s]" % (st, len(ids), _span(sorted(ids)))
+                      for st, ids in by.items())))
+        if dry_run:
+            return rows
+        done = []
+        for st, ids in by.items():
+            done += self.cancel(st, ids, queued_only=True, out=out)
+        return done
 
     def plan_summary(self, items):
         """Rows describing planned submissions: tasks, arrays, jobs, events, slurm settings."""
@@ -619,7 +661,8 @@ class Campaign:
 
     def advance(self, stages=None, recover=False, max_queued=None, dry_run=False, out=print,
                 plan=None):
-        """Sync, then submit every ready task of every enabled stage (in stage order).
+        """Sync, then submit every ready task of every enabled stage (in stage order),
+        within max_queued and the storage budget.
 
         recover     also resubmit failed tasks that have attempts left
         max_queued  per-stage cap on queued+running array elements (overrides the
@@ -627,37 +670,16 @@ class Campaign:
         plan        submit exactly this plan_advance() result instead of re-planning
         Returns {stage: number of tasks submitted}.
         """
+        if plan is None:
+            plan = self.plan_advance(stages, recover=recover, max_queued=max_queued, out=out)
         submitted = {}
-        if plan is not None:
-            for stage, recovery, entries in plan:
-                for r in self.submit(stage, recovery=recovery, dry_run=dry_run, entries=entries):
-                    submitted[stage] = submitted.get(stage, 0) + r["n_tasks"]
-                    out("%s%s: %s %d task(s) [%s]%s" % (
-                        "[dry-run] " if dry_run else "", stage,
-                        "resubmitted" if recovery else "submitted", r["n_tasks"],
-                        _span(r["task_ids"]), "" if dry_run else " as array %s" % r["array_job_id"]))
-            return submitted
-        for stage in stages or list(self.cfg["stages"]):
-            s = self.cfg["stages"][stage]
-            if not s["enabled"]:
-                continue
-            self.sync()       # cheap; lets a stage see what finished upstream just now
-            cap = max_queued if max_queued is not None else s["max_queued"]
-            n = 0
-            for recovery in ((False, True) if recover else (False,)):
-                limit = None
-                if cap is not None:
-                    limit = max(0, int(cap) - self.n_active(stage) - (n if dry_run else 0))
-                    if limit == 0:
-                        break
-                for r in self.submit(stage, recovery=recovery, limit=limit, dry_run=dry_run):
-                    n += r["n_tasks"]
-                    ids = r["task_ids"]
-                    out("%s%s: %s %d task(s) [%s]%s" % (
-                        "[dry-run] " if dry_run else "", stage,
-                        "resubmitted" if recovery else "submitted", r["n_tasks"],
-                        _span(ids), "" if dry_run else " as array %s" % r["array_job_id"]))
-            submitted[stage] = n
+        for stage, recovery, entries in plan:
+            for r in self.submit(stage, recovery=recovery, dry_run=dry_run, entries=entries):
+                submitted[stage] = submitted.get(stage, 0) + r["n_tasks"]
+                out("%s%s: %s %d task(s) [%s]%s" % (
+                    "[dry-run] " if dry_run else "", stage,
+                    "resubmitted" if recovery else "submitted", r["n_tasks"],
+                    _span(r["task_ids"]), "" if dry_run else " as array %s" % r["array_job_id"]))
         return submitted
 
     def progress(self):
@@ -984,6 +1006,131 @@ class Campaign:
                 raise CampaignError("summary merge failed (exit %d): %s" % (rc, cmd))
         return missing
 
+    # ------------------------------------------------------------------ reset-stage
+    def descendants(self, stage):
+        """The stage and every stage below it, in config order."""
+        out = [stage]
+        for st, s in self.cfg["stages"].items():
+            if s["parent"] in out and st not in out:
+                out.append(st)
+        return [st for st in self.cfg["stages"] if st in out]
+
+    def reset_stage_plan(self, stage):
+        """What `reset-stage` would do: {stages, tasks: {stage: n}, paths: [(path, bytes)],
+        active: [attempt rows], inherited_by: [(campaign, stage)]}."""
+        stages = self.descendants(stage)
+        ext = [st for st in stages if self.cfg["stages"][st]["external"]]
+        if ext:
+            raise CampaignError("stage(s) %s come from campaign %s (read-only here)"
+                                % (", ".join(ext), self.cfg["stages"][ext[0]]["external"]))
+        self.sync()
+        tasks, paths = {}, []
+        for st in stages:
+            tasks[st] = self.con.execute(
+                "SELECT COUNT(*) FROM tasks WHERE stage = ? AND (status != 'new' OR n_attempts > 0)"
+                " AND status != 'abandoned'", (st,)).fetchone()[0]
+            for p in (os.path.join(self.dir, "data", st), self.merged_summary_path(st)):
+                if os.path.exists(p):
+                    paths.append((p, _tree_size(p)))
+        active = [r for st in stages for r in self._selected_active(st, None, queued_only=False)]
+        inherited = []
+        for cfg_path in sorted(glob.glob(os.path.join(self.site["storage_root"], "*", "campaign.yaml"))):
+            if os.path.realpath(os.path.dirname(cfg_path)) == os.path.realpath(self.dir):
+                continue
+            try:
+                other = C.load_yaml(cfg_path)
+            except Exception:
+                continue
+            for st, sc in (other.get("stages") or {}).items():
+                if (sc or {}).get("external") == self.tag and st in stages:
+                    inherited.append((other.get("campaign"), st))
+        return {"stages": stages, "tasks": tasks, "paths": paths, "active": active,
+                "inherited_by": inherited}
+
+    def reset_stage(self, stage, allow_inherited=False, wait_s=600, out=print):
+        """Clear a stage and every stage below it so they run again from scratch:
+        cancel their jobs (and wait until slurm has stopped them), put their tasks back
+        to 'new' with a fresh max_attempts count (abandoned tasks stay abandoned),
+        unregister their files, then delete data/<stage>/ and the merged summary file.
+        Attempt history, logs and per-attempt summaries are kept."""
+        plan = self.reset_stage_plan(stage)
+        if plan["inherited_by"] and not allow_inherited:
+            raise CampaignError("campaign(s) %s use these stages' outputs (inherited); resetting would "
+                                "remove their inputs. Add --allow-inherited to do it anyway" % ", ".join(
+                                    sorted(set("%s (%s)" % x for x in plan["inherited_by"]))))
+        stages = plan["stages"]
+        if plan["active"]:
+            out("cancelling %d queued/running element(s) ..." % len(plan["active"]))
+            for st in stages:
+                self.cancel(st, out=out)
+        self._wait_stopped(self._stopping(stages), wait_s, out)
+        with self.con:
+            for st in stages:
+                ids = [r[0] for r in self.con.execute("SELECT id FROM files WHERE stage = ?", (st,))]
+                for i in range(0, len(ids), 500):
+                    chunk = ids[i:i + 500]
+                    marks = ",".join("?" * len(chunk))
+                    self.con.execute("DELETE FROM events WHERE file_id IN (%s)" % marks, chunk)
+                    self.con.execute("DELETE FROM files WHERE id IN (%s)" % marks, chunk)
+                self.con.execute("UPDATE attempts SET uncounted = 1 WHERE stage = ?", (st,))
+                self.con.execute(
+                    "UPDATE tasks SET status = 'new', n_events = NULL, note = ?, updated = ?"
+                    " WHERE stage = ? AND status != 'abandoned'",
+                    ("reset (dprod reset-stage %s)" % stage, D.now(), st))
+        removed = []
+        for p, size in plan["paths"]:
+            rp = os.path.realpath(p)
+            if not rp.startswith(os.path.realpath(self.dir) + os.sep):
+                out("skipped (outside the campaign dir): %s" % p)
+                continue
+            errors = []
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, onerror=lambda f, path, e: errors.append(path))
+            else:
+                try:
+                    os.remove(p)
+                except OSError:
+                    errors.append(p)
+            removed.append((p, size, errors))
+        return plan, removed
+
+    def _stopping(self, stages=None):
+        """Cancelled attempts whose last known scheduler state was not final: their jobs
+        may still be dying (also those cancelled by an earlier, interrupted command)."""
+        q = ("SELECT a.*, s.array_job_id FROM attempts a JOIN submissions s ON s.id = a.submission_id"
+             " WHERE a.state = 'cancelled' AND COALESCE(a.sched_state, 'PENDING') NOT IN (%s)"
+             % ",".join("?" * len(TERMINAL)))
+        args = sorted(TERMINAL)
+        if stages is not None:
+            q += " AND a.stage IN (%s)" % ",".join("?" * len(stages))
+            args += list(stages)
+        return self.con.execute(q, args).fetchall()
+
+    def _wait_stopped(self, rows, wait_s, out, what="deleted"):
+        """Wait until the scheduler reports the cancelled elements as finished, so that
+        no dying job writes outputs after they are deleted. Raises after wait_s."""
+        t0, told = time.time(), False
+        while rows:
+            info = self.sched.query(sorted(set(r["array_job_id"] for r in rows if r["array_job_id"])))
+            with self.con:       # remember final states: those need no waiting next time
+                for r in rows:
+                    st = (info.get((r["array_job_id"], r["array_index"])) or {}).get("state")
+                    if st:
+                        self.con.execute("UPDATE attempts SET sched_state = ? WHERE stage = ? AND"
+                                         " task_id = ? AND attempt = ?",
+                                         (st, r["stage"], r["task_id"], r["attempt"]))
+            rows = [r for r in rows if (info.get((r["array_job_id"], r["array_index"])) or {}).get("state")
+                    in RUNNING | {"PENDING", "SUSPENDED", "REQUEUED", "RESIZING"}]
+            if not rows:
+                return
+            if time.time() - t0 > wait_s:
+                raise CampaignError("%d cancelled element(s) still not stopped after %d s; nothing %s."
+                                    " Check squeue, then run the command again" % (len(rows), wait_s, what))
+            if not told:
+                out("waiting for %d cancelled element(s) to stop ..." % len(rows))
+                told = True
+            time.sleep(10)
+
     # ------------------------------------------------------------------ destroy
     def destroy_plan(self):
         """Paths `destroy` would remove: [(path, bytes)], plus the active attempts."""
@@ -1015,7 +1162,7 @@ class Campaign:
         self.sync()
         return out, self._selected_active(None, None, queued_only=False)
 
-    def destroy(self, wait_s=180, out=print):
+    def destroy(self, wait_s=600, out=print):
         """Cancel the campaign's jobs and delete its directories (see destroy_plan)."""
         storage = os.path.realpath(self.site["storage_root"])
         cdir = os.path.realpath(self.dir)
@@ -1026,17 +1173,9 @@ class Campaign:
         plan, active = self.destroy_plan()
         if active:
             out("cancelling %d queued/running element(s) ..." % len(active))
-            self.cancel()
-            t0 = time.time()
-            while time.time() - t0 < wait_s:
-                self.sync()
-                left = self._selected_active(None, None, queued_only=False)
-                if not left:
-                    break
-                time.sleep(10)
-            else:
-                out("warning: %d element(s) still active after %d s; deleting anyway" % (
-                    len(left), wait_s))
+            self.cancel(out=out)
+        # until slurm has stopped them, dying jobs could write into what is deleted
+        self._wait_stopped(self._stopping(), wait_s, out)
         self.con.close()
         try:
             from .web import web_base
