@@ -70,7 +70,7 @@ dprod relocate-bookkeeping      # move bookkeeping.sqlite + lock to the site's c
 dprod mark 1 17,20-25 --abandon --note "reason"
 dprod lookup 123 45             # all files (every stage/role) holding job 123 event 45
 dprod files 2A -l               # registered outputs with job ranges and event counts
-dprod extend 2000               # more stage-1 jobs; downstream tasks are defined automatically
+dprod extend 12000              # grow stage 1 to 12000 jobs in total (not +12000); downstream tasks follow
 dprod cancel 2A --queued        # scancel queued elements; their tasks go back to 'new'
 dprod move 2A --partition P --account A   # re-route queued elements in place (scontrol update)
 dprod check <campaign.yaml>     # preflight: tools, paths, images, software (before init)
@@ -393,7 +393,7 @@ bin/dprod update-config configs/campaigns/<campaign>.yaml             # apply (p
   Each refusal says why.
 * **Allowed:** everything else, e.g. enabling a stage, commands, `vars`, `env`, `slurm`, `provenance`,
   `max_attempts` or `max_queued`. It applies to submissions from then on. New stages get their tasks defined.
-  `n_jobs` is ignored; use `dprod extend`.
+  `n_jobs` is ignored; use `dprod extend <new total>`.
 * **Provenance:** outputs record which campaign-config version produced them. Every task block has
   `@campaign_config_sha256`, and earlier versions an input was made with are kept under
   `/provenance/campaign_config_history/`.
