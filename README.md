@@ -521,8 +521,28 @@ Downstream stages (JAXTPC, and later pysupera) get `<campaign>_<stage>_summary.h
 | max_rss_mb, avg_rss_mb | peak / time-averaged CPU RAM |
 | n_gpus, gpu_util_pct, gpu_mem_used_mb, gpu_mem_max_mb, gpu_mem_total_mb | time-averaged GPU utilization and memory, peak memory, card memory (NaN if not a GPU job) |
 | seed | the task seed passed as `{seed}` |
+| n_issues | rows in the outputs' `issues/` groups (see below); -1 if no output had one |
 
 `dprod merge-summary [stage,...]` writes every stage by default.
+
+### Issues a stage recorded
+
+Some problems don't fail a job: pysupera (4.x) records each check that found
+something but let the run go on in an `issues/` group of its output, under a
+fixed integer code and name, such as `PRIMARY_TABLE_MISMATCH` or `EMPTY_IMAGE`.
+After a `command` stage runs, the worker reads that group from every `.h5`
+output that has one:
+
+* A file with issues adds one warning, for example `<file>: 3 issue(s):
+  EMPTY_IMAGE=1, PRIMARY_TABLE_MISMATCH=2; first: event 50: ...`. Warnings become
+  the task's note, which `dprod tasks <stage>` shows, and are logged as
+  `WARNING:` lines.
+* The attempt's JSON summary gets `issues` (`{name: count}` over the task), and
+  each `files` entry gets its file's `{total, by_code, first}`.
+* The task table above gets `n_issues`.
+
+An empty group means the checks ran and found nothing. The task still
+succeeds either way: issues are for people to look at, not for retrying.
 
 A primary's 4-position is the creation point of its interaction: the
 `vertex/geant4` row whose interaction_id matches the primary's. E = ke + mass. Jobs are appended in completion order, so use `/job` to find a job.
@@ -662,3 +682,6 @@ This runs 6 real edep-sim jobs (3 events each) in the stage-1 image, and a fake 
 stage in `test.sif`. The fake stage mimics JAXTPC's layout, loads the GPU with JAX and fails once on
 purpose to test recovery. `tests/check_summary.py` then cross-checks the merged job summary
 against the edep-sim files.
+
+`tests/test_issues.py <scratch dir>` (in `test.sif`) checks reading an output's
+`issues/` group into warnings, the summary and `n_issues`.

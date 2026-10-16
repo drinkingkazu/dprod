@@ -274,7 +274,14 @@ TASK_DTYPE = np.dtype([
     ("n_gpus", "i2"), ("gpu_util_pct", "f4"), ("gpu_mem_used_mb", "f4"),
     ("gpu_mem_max_mb", "f4"), ("gpu_mem_total_mb", "f4"),
     ("seed", "i8"),
+    ("n_issues", "i4"),     # rows in the outputs' issues/ groups; -1: none written
 ])
+
+
+def _n_issues(summary):
+    """Issues over the task's outputs; None (-1 in the table) if none had a group."""
+    found = [f["issues"] for f in summary.get("files") or [] if f.get("issues") is not None]
+    return sum(i["total"] for i in found) if found else None
 
 
 def task_row(summary):
@@ -296,6 +303,7 @@ def task_row(summary):
         "gpu_mem_used_mb": res.get("gpu_mem_used_mb"), "gpu_mem_max_mb": res.get("gpu_mem_max_mb"),
         "gpu_mem_total_mb": res.get("gpu_mem_total_mb"),
         "seed": (summary.get("seeds") or {}).get("task"),
+        "n_issues": _n_issues(summary),
     }
     for k, v in vals.items():
         if v is None:

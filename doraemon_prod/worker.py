@@ -32,7 +32,7 @@ import time
 import traceback
 
 from . import layout
-from .idreaders import IdReadError, read_ids
+from .idreaders import IdReadError, describe_issues, read_ids, read_issues
 
 EDEPSIM_LOG_ERRORS = (
     "COMMAND NOT FOUND",
@@ -280,7 +280,17 @@ def run_command(m, task, work, env):
                 if (j, e) in n:
                     raise TaskFailure("event (%d, %d) appears twice in role %s" % (j, e, role))
                 n.add((j, e))
-        outputs.append({"local": p, "rel": "%s/%s" % (dest, rel), "role": role, "events": ids})
+        o = {"local": p, "rel": "%s/%s" % (dest, rel), "role": role, "events": ids}
+        # what the stage noticed but did not stop for (pysupera's issues/ group)
+        try:
+            o["issues"] = read_issues(p) if p.endswith(".h5") else None
+        except Exception as e:     # the ids were readable, so the output stands
+            o["issues"] = None
+            warnings.append("%s: unreadable issues/ group: %s: %s" % (rel, type(e).__name__, e))
+        line = describe_issues(rel, o["issues"])
+        if line:
+            warnings.append(line)
+        outputs.append(o)
 
     expected = task.get("expected_events")
     for role, evs in per_role.items():
@@ -510,6 +520,7 @@ def run_task(m, index, work_root):
         "expected_events": task.get("expected_events"),
         "n_input_jobs": task.get("n_input_jobs"),
         "reason": None, "files": [], "warnings": [], "n_events": 0,
+        "issues": {},     # {issue name: count} over the outputs' issues/ groups
     }
     work = None
     mon_cfg = m.get("monitor") or {}
@@ -548,7 +559,10 @@ def run_task(m, index, work_root):
             copy_atomic(o["local"], os.path.join(cdir, o["rel"]))
             summary["files"].append({"path": o["rel"], "role": o["role"],
                                      "size": os.path.getsize(o["local"]),
-                                     "events": {str(j): e for j, e in o["events"].items()}})
+                                     "events": {str(j): e for j, e in o["events"].items()},
+                                     "issues": o.get("issues")})
+            for name, n in ((o.get("issues") or {}).get("by_code") or {}).items():
+                summary["issues"][name] = summary["issues"].get(name, 0) + n
         for o in outputs:
             if "summary_tables" in o:
                 write_job_summary_file(m, task, summary, o["summary_tables"], work, monitor)

@@ -108,6 +108,39 @@ def read_pysupera(path, rel_path, options):
     return _collect(zip(jobs, evs))
 
 
+def read_issues(path, n_first=3):
+    """What a stage recorded in the output's issues/ group (pysupera 4.x and later).
+
+    None when the file has no such group. Otherwise {"total": n, "by_code":
+    {name: n}, "first": [up to n_first "event E: message" lines]}. An empty group
+    (total 0) means the stage ran its checks and found nothing.
+    """
+    with _h5().File(path, "r") as f:
+        if "issues" not in f:
+            return None
+        g = f["issues"]
+        codes, events = g["code"][()], g["event"][()]
+        dec = lambda x: x.decode() if isinstance(x, bytes) else str(x)
+        names = {int(c): dec(n) for c, n in zip(g["codes/code"][()], g["codes/name"][()])}
+        msgs = [dec(m) for m in g["message"][:n_first]]
+    by_code = {}
+    for c in codes:
+        name = names.get(int(c), "code_%d" % int(c))
+        by_code[name] = by_code.get(name, 0) + 1
+    first = [("file" if e < 0 else "event %d" % e) + ": " + m
+             for e, m in zip(events[:n_first], msgs)]
+    return {"total": int(len(codes)), "by_code": by_code, "first": first}
+
+
+def describe_issues(rel_path, issues):
+    """One warning line for a file's issues, or None when it has none."""
+    if not issues or not issues["total"]:
+        return None
+    counts = ", ".join("%s=%d" % kv for kv in sorted(issues["by_code"].items()))
+    return "%s: %d issue(s): %s; first: %s" % (
+        rel_path, issues["total"], counts, " | ".join(issues["first"]))
+
+
 READERS = {
     "edepsim": read_event_table,
     "event_table": read_event_table,
