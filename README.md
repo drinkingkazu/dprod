@@ -60,7 +60,7 @@ dprod submit 2A                 # whatever stage-2A tasks have their inputs read
 dprod advance --recover         # every stage at once: all ready tasks, plus retries of failures
 dprod watch --recover --web     # repeat `advance` every 10 min until nothing can progress,
                                 # updating the monitoring page each round
-dprod web                       # write the monitoring page once
+dprod web                       # write the monitoring page once (both views)
 dprod failures 1 -v             # reasons, slurm ids, log tarballs; for jobs that died before
                                 # the worker started (e.g. container failure) the job log's error line
 dprod recover 1                 # resubmit failed tasks (attempt < max_attempts) and cancelled ones
@@ -247,6 +247,8 @@ bin/dprod submit 3B                     # or let watch / dprod-cron pick the tas
   to *new* with a fresh `max_attempts` count. Finally it deletes `data/<stage>/` (registered outputs and any
   leftovers) and the stage's merged summary file. Abandoned tasks stay abandoned.
 * **Kept:** the attempt history, logs and per-attempt summaries (`dprod failures`/`tasks` still show earlier attempts).
+* **Monitoring page:** it rewrites both views at the end. The job-records view ignores the records of earlier
+  attempts of tasks that are *new* again, so the reset stage shows no finished tasks there either.
 * **Protected:** it refuses if another campaign inherits one of these stages (it would lose its inputs) unless you add
   `--allow-inherited`, and production tags (`prod_*`) need `--allow-production`.
 * **To keep the old outputs** until the new ones are validated, add a new stage or a derived campaign instead

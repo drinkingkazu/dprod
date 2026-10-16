@@ -176,6 +176,19 @@ def write(c, out=None, publish=False, log=print):
     return path
 
 
+def refresh(c, log=print):
+    """Rewrite both views of the page (status.json and the job-records jobs.json) now,
+    e.g. after a command that removed history the jobs would not rebuild by themselves.
+    Never fatal."""
+    try:
+        log("monitoring page: %s" % write(c, publish=True, log=log))
+        if (c.site.get("web") or {}).get("job_snapshot", True):
+            from .webdata import rebuild_from_job
+            rebuild_from_job(c.dir, web_dir(c), force=True, base=web_base(c.site))
+    except Exception as e:
+        log("warning: monitoring page not updated: %s" % e)
+
+
 PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>

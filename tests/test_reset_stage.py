@@ -96,6 +96,25 @@ def finish(stage, task_ids):
             D.set_task_status(c.con, stage, tid, D.DONE, n_events=2 * len(events))
 
 
+def write_records(stage, task_ids):
+    """The job-side records a finished attempt leaves (for the monitoring page)."""
+    from doraemon_prod import webdata as W
+    c = camp()
+    for tid in task_ids:
+        t = c.con.execute("SELECT * FROM tasks WHERE stage = ? AND task_id = ?", (stage, tid)).fetchone()
+        W.write_record(CDIR, stage, {"task_id": tid, "attempt": t["n_attempts"], "first_job": t["first_job"],
+                                     "last_job": t["last_job"],
+                                     "name": L.task_name(stage, t["first_job"], t["last_job"])},
+                       "done", {"n_events": 2, "wall_s": 1.0})
+
+
+def page_done(stage):
+    """Done counts of a stage in both views of the monitoring page."""
+    web = os.path.join(CDIR, "web")
+    return [[s for s in json.load(open(os.path.join(web, f)))["stages"] if s["name"] == stage][0]
+            ["counts"]["done"] for f in ("status.json", "jobs.json")]
+
+
 def n_files(stage):
     return camp().con.execute("SELECT COUNT(*) FROM files WHERE stage = ?", (stage,)).fetchone()[0]
 
@@ -105,6 +124,7 @@ dprod("submit", "1")
 finish("edepsim", range(6))
 dprod("submit", "2A")
 finish("jaxtpc_wire", [0, 1])                 # task 2 stays queued
+write_records("jaxtpc_wire", [0, 1])
 leftover = os.path.join(CDIR, "data", "jaxtpc_wire", "j000000", "stray_from_an_old_version.h5")
 open(leftover, "w").write("old")
 open(camp().merged_summary_path("jaxtpc_wire"), "w").write("summary")
@@ -167,6 +187,8 @@ assert all(c.attempts_used("jaxtpc_wire", t) == 0 for t in range(3))     # fresh
 assert set(states("edepsim").values()) == {"done"} and n_files("edepsim") == 6
 assert os.path.exists(os.path.join(CDIR, "data", "edepsim"))
 assert dprod("lookup", "0", "0").count("jaxtpc_wire") == 0
+assert page_done("jaxtpc_wire") == [0, 0], page_done("jaxtpc_wire")     # old records are history
+assert page_done("edepsim")[0] == 6
 print("OK: 2A outputs unregistered and deleted, tasks new, stage 1 untouched")
 
 # 6. it runs again: new attempts, inputs from stage 1

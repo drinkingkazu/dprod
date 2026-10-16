@@ -147,9 +147,15 @@ def write_plan(c):
             "SELECT task_id FROM tasks WHERE stage = ? AND status = 'abandoned'", (name,))]
         cx = [[r[0], r[1]] for r in con.execute(
             "SELECT task_id, attempt FROM attempts WHERE stage = ? AND state = 'cancelled'", (name,))]
+        # earlier attempts of tasks that are 'new' again (dprod reset-stage): their
+        # records are history, not the task's state
+        old = [[r[0], r[1]] for r in con.execute(
+            "SELECT a.task_id, a.attempt FROM attempts a JOIN tasks t ON t.stage = a.stage AND"
+            " t.task_id = a.task_id WHERE a.stage = ? AND t.status = 'new' AND a.state != 'cancelled'",
+            (name,))]
         entry = {"name": name, "alias": s["alias"] or name, "parent": s["parent"],
                  "enabled": s["enabled"], "merge": s["merge"], "tasks": n, "abandoned": ab,
-                 "cancelled": cx, "external": s.get("external")}
+                 "cancelled": cx + old, "external": s.get("external")}
         if s.get("external"):       # no job records here: pass the imported state along
             entry["counts"] = {r[0]: r[1] for r in con.execute(
                 "SELECT status, COUNT(*) FROM tasks WHERE stage = ? GROUP BY status", (name,))}

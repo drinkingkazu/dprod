@@ -389,6 +389,11 @@ def cmd_web(a):
         c.sync()
     path = write(c, out=a.out, publish=a.publish)
     print("wrote %s (and status.json)" % path)
+    if not a.out and (c.site.get("web") or {}).get("job_snapshot", True):
+        from .web import web_base, web_dir
+        from .webdata import rebuild_from_job
+        rebuild_from_job(c.dir, web_dir(c), force=True, base=web_base(c.site))
+        print("rebuilt the job-records view (jobs.json)")
 
 
 def cmd_sync(a):
@@ -748,6 +753,8 @@ def cmd_reset_stage(a):
         print("removed %s (%s)%s" % (p, _human(size),
                                      "; %d path(s) could not be removed, e.g. %s" % (len(errors), errors[0])
                                      if errors else ""))
+    from .web import refresh
+    refresh(c)
     print("reset done; the tasks are 'new': `dprod submit %s` (or watch / dprod-cron) runs them again"
           % a.stage)
 
@@ -851,7 +858,7 @@ def build_parser():
                    help="also write (and publish) the monitoring page every round")
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("web", help="write the monitoring page (index.html + status.json)")
+    p = sub.add_parser("web", help="write the monitoring page (index.html + status.json, and jobs.json)")
     p.add_argument("--out", help="output directory (default: site web.dir, or <campaign>/web)")
     p.add_argument("--publish", action="store_true", help="run the site's web.publish command")
     p.add_argument("--no-sync", action="store_true")
