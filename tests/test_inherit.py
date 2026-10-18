@@ -116,6 +116,9 @@ print("OK: new source output is imported at sync; the remaining 3A task ran")
 d("derived", "merge-summary")
 d("derived", "web", "--no-sync")
 keep = [os.path.join(src_dir, f["path"]) for f in D.task_files(camp("srcamp").con, "jaxtpc_wire", 0)]
+assert "WARNING: campaign derived inherits" in d("srcamp", "destroy", "--dry-run")
+d("srcamp", "destroy", "--confirm", "srcamp", rc=1)       # derived reads its files
+assert os.path.exists(os.path.join(src_dir, "bookkeeping.sqlite"))
 d("derived", "destroy", "--confirm", "derived")
 assert not os.path.exists(os.path.join(ROOT, "storage", "derived"))
 assert all(os.path.exists(x) for x in keep) and os.path.exists(os.path.join(src_dir, "bookkeeping.sqlite"))

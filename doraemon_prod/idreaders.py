@@ -55,7 +55,46 @@ _RUN_DIR_RE = re.compile(r"(?:^|/)run_(\d+)(?:/|$)")
 
 
 def read_jaxtpc(path, rel_path, options):
-    """JAXTPC sensor/step/hits files: one group per event (event_NNN, attr event_id).
+    """JAXTPC sensor/step/hits files.
+
+    Format 2 (entry_NNNNNN groups, JAXTPC's production/entries.py): every entry
+    names its event -- job_id/job_event copied from the dprod input, or else
+    the job from its input file's name (config/source_files[source_index]) and
+    the event from its event_id. One file may hold several jobs (--merge-output).
+    Format 1 below.
+    """
+    with _h5().File(path, "r") as f:
+        entries = [k for k in f.keys() if k.startswith("entry_")]
+        if entries:
+            return _collect(_jaxtpc_entry_ids(f, entries, rel_path))
+    return _read_jaxtpc_v1(path, rel_path, options)
+
+
+def _jaxtpc_entry_ids(f, entries, rel_path):
+    cfg = f.get("config")
+    srcs = []
+    if cfg is not None and "source_files" in cfg:
+        srcs = [x.decode() if isinstance(x, bytes) else str(x) for x in cfg["source_files"][()]]
+    jobs = {}
+    for k in entries:
+        a = f[k].attrs
+        if "job_id" in a and "job_event" in a:
+            yield int(a["job_id"]), int(a["job_event"])
+            continue
+        si = int(a.get("source_index", 0))
+        if si not in jobs:
+            rng = parse_job_range(os.path.basename(srcs[si])) if si < len(srcs) else None
+            if not rng or rng[0] != rng[1]:
+                raise IdReadError("%s: %s has no job_id and its input %s does not name one job"
+                                  % (rel_path, k, srcs[si] if si < len(srcs) else "(unknown)"))
+            jobs[si] = rng[0]
+        if "event_id" not in a:
+            raise IdReadError("%s: %s has no event_id attribute" % (rel_path, k))
+        yield jobs[si], int(a["event_id"])
+
+
+def _read_jaxtpc_v1(path, rel_path, options):
+    """JAXTPC format 1: one group per event (event_NNN, attr event_id).
 
     The job id is taken from, in order of preference and cross-checked:
       1. the `source_file` attribute of the `config` group (our edep-sim file
@@ -97,12 +136,16 @@ def read_jaxtpc(path, rel_path, options):
 
 
 def read_pysupera(path, rel_path, options):
-    """pysupera output tagged by doraemon_prod.stages.supera: events/job_id, events/event_id."""
+    """pysupera output: events/job_id + events/job_event (pysupera 4.1 copies them,
+    with the campaign-unique events/event_id, from the dprod input), or, as
+    tagged by older doraemon_prod.stages.supera, events/job_id + events/event_id
+    (the event's number within its job)."""
     with _h5().File(path, "r") as f:
         if "events/job_id" not in f or "events/event_id" not in f:
             raise IdReadError("%s: no events/job_id + events/event_id (not tagged)" % rel_path)
         n = int(f["n_events"][()]) if "n_events" in f else None
-        jobs, evs = f["events/job_id"][:], f["events/event_id"][:]
+        jobs = f["events/job_id"][:]
+        evs = f["events/job_event"][:] if "events/job_event" in f else f["events/event_id"][:]
     if n is not None and not len(jobs) == len(evs) == n:
         raise IdReadError("%s: id arrays do not match n_events=%d" % (rel_path, n))
     return _collect(zip(jobs, evs))

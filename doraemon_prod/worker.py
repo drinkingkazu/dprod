@@ -166,6 +166,12 @@ def run_edepsim(m, task, work, env):
         raise TaskFailure("output run_id(s) %s != job id %d" % (sorted(ids), job))
     if ids[job] != list(range(n_ev)):
         raise TaskFailure("expected events 0..%d, found %d events" % (n_ev - 1, len(ids[job])))
+    # the events' identity, in file order: downstream stages copy it from here
+    import h5py
+    with h5py.File(out, "r") as f:
+        t = f["event/geant4"][:]
+    _write_identity(out, m, task, m["stage"], list(zip(t["run_id"], t["event_id"])),
+                    order="file")
 
     from .provenance import write as write_provenance
     fmt = template_vars(m, task, work, work)
@@ -187,6 +193,25 @@ def run_edepsim(m, task, work, env):
     rel = "%s/%s.h5" % (layout.data_rel_dir(m["stage"], job), task["name"])
     return [{"local": out, "rel": rel, "role": m["stage"], "events": ids,
              "summary_tables": tables}], []
+
+
+def _table_pairs(path, options=None):
+    """(job, event) rows of an event table (idreaders.read_event_table), in file order."""
+    import h5py
+    o = options or {}
+    with h5py.File(path, "r") as f:
+        t = f[o.get("dataset", "event/geant4")][()]
+    return list(zip(t[o.get("job_field", "run_id")].tolist(), t[o.get("event_field", "event_id")].tolist()))
+
+
+def _write_identity(path, m, task, role, pairs, order="sorted"):
+    """/dprod: campaign, stage, task and the events' ids (see identity.py)."""
+    from .identity import write
+    try:
+        write(path, m, task, role, pairs, order=order)
+    except Exception as e:
+        raise TaskFailure("could not write /dprod into %s: %s: %s" % (
+            os.path.basename(path), type(e).__name__, e))
 
 
 # --------------------------------------------------------------------------- stage 2/3
@@ -281,6 +306,14 @@ def run_command(m, task, work, env):
                     raise TaskFailure("event (%d, %d) appears twice in role %s" % (j, e, role))
                 n.add((j, e))
         o = {"local": p, "rel": "%s/%s" % (dest, rel), "role": role, "events": ids}
+        if p.endswith(".h5"):
+            if sc["id_reader"] in ("edepsim", "event_table"):
+                # an event table (e.g. stage-1 files re-labelled by stages.link_edepsim):
+                # in file order, as stage 1 writes it, for downstream stages to copy
+                _write_identity(p, m, task, role, _table_pairs(p, sc.get("id_reader_options")),
+                                order="file")
+            else:
+                _write_identity(p, m, task, role, [(j, e) for j, evs in ids.items() for e in evs])
         # what the stage noticed but did not stop for (pysupera's issues/ group)
         try:
             o["issues"] = read_issues(p) if p.endswith(".h5") else None

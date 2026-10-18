@@ -1,0 +1,120 @@
+# Derived campaign for tests/run_chain_test.sh: inherits stage 1 of
+# chaintest_doraemon_v0.0 (whose edep-sim files the test strips of /dprod, as
+# files written before dprod wrote it), re-labels them with stages.link_edepsim
+# (small files of HDF5 external links + this campaign's /dprod), and runs
+# 2A/2B/3A/3B on those. Every file says campaign chainderived_doraemon_v0.0,
+# origin_campaign chaintest_doraemon_v0.0.
+campaign: chainderived_doraemon_v0.0
+seed: 4343
+max_attempts: 1
+
+inherit:
+  campaign: chaintest_doraemon_v0.0
+  stages: [edepsim]
+
+stages:
+  edepsim_link:
+    alias: 1L
+    parent: edepsim
+    merge: 2                      # one task per 2 jobs, one link file per job
+    profile: cpu
+    command: python3 -m doraemon_prod.stages.link_edepsim --outdir {outdir} {inputs}
+    outputs: "*.h5"
+    id_reader: event_table
+    strict_events: true
+
+  jaxtpc_wire:
+    alias: 2A
+    parent: edepsim_link
+    merge: 2
+    profile: gpu
+    command: >-
+      cd {jaxtpc_dir} && python3 production/run_batch.py
+      --data {inputs}
+      --config {detector_config}
+      --production-config {production_config}
+      --outdir {outdir} --dataset sim_wire --merge-output {stage}_j{first_job:06d}-{last_job:06d}
+      --production-version {campaign} --seed {seed}
+      --workers 2 --read-workers 2 --codec blosc-lz4
+    vars:
+      detector_config: "{jaxtpc_dir}/config/cubic_wireplane_config.yaml"
+      production_config: "{jaxtpc_dir}/config/production_cubic_wireplane_doraemon_300micro.yaml"
+    provenance:
+      roles: [sensor, hits]
+      files:
+        detector_config: "{detector_config}"
+        production_config: "{production_config}"
+      software:
+        JAXTPC: "{jaxtpc_dir}"
+    outputs: "*/*.h5"             # merged: sensor/, step/, hits/ -> file roles
+    id_reader: jaxtpc
+    env:
+      PYTHONPATH: ""
+
+  jaxtpc_pixel:
+    alias: 2B
+    parent: edepsim_link
+    merge: 2
+    profile: gpu
+    command: >-
+      cd {jaxtpc_dir} && python3 production/run_batch.py
+      --data {inputs}
+      --config {detector_config}
+      --production-config {production_config}
+      --outdir {outdir} --dataset sim_pixel --merge-output {stage}_j{first_job:06d}-{last_job:06d}
+      --production-version {campaign} --seed {seed}
+      --workers 2 --read-workers 2 --codec blosc-lz4
+    vars:
+      detector_config: "{jaxtpc_dir}/config/cubic_pixel_config.yaml"
+      production_config: "{jaxtpc_dir}/config/production_cubic_pixel_doraemon_300micro.yaml"
+    provenance:
+      roles: [sensor, hits]
+      files:
+        detector_config: "{detector_config}"
+        production_config: "{production_config}"
+      software:
+        JAXTPC: "{jaxtpc_dir}"
+    outputs: "*/*.h5"
+    id_reader: jaxtpc
+    env:
+      PYTHONPATH: ""
+
+  supera_wire:
+    alias: 3A
+    parent: jaxtpc_wire
+    merge: 1
+    profile: cpu
+    also_inputs: [edepsim_link]
+    input_roles: [hits]
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout wire --merged
+      --edepsim {inputs_edepsim_link} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    id_reader: pysupera
+    provenance:
+      software:
+        pysupera: "{pysupera_dir}"
+
+  supera_pixel:
+    alias: 3B
+    parent: jaxtpc_pixel
+    merge: 1
+    profile: cpu
+    also_inputs: [edepsim_link]
+    input_roles: [hits]
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout pixel --merged
+      --edepsim {inputs_edepsim_link} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    id_reader: pysupera
+    provenance:
+      software:
+        pysupera: "{pysupera_dir}"

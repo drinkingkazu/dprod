@@ -14,8 +14,14 @@ Controls and keeps the books for the multi-stage DORAEMON production:
   `configs/campaigns/`. Everything lives in `<storage_root>/<campaign>/`.
 * **Job id**: 0-indexed and unique across all arrays of a campaign. There is one stage-1
   task per job id. edep-sim is told `/edep/runId <job id>`, so the Geant4
-  `run_id` in the output *is* the job id. **Event id** is the Geant4 event
-  number (0..N-1). `(job id, event id)` identifies an event in every stage.
+  `run_id` in the output *is* the job id. The Geant4 event number (0..N-1) is
+  the event's number *within its job* (`job_event`); `(job id, job_event)`
+  identifies an event in every stage and in the bookkeeping.
+* **Event id**: `event_id = job_id * events_per_job + job_event`, unique within the
+  campaign, so `(campaign, event_id)` names an event anywhere. Every output file
+  says what it is in a `/dprod` group (campaign, stage, task, its events' ids;
+  see [Event identity in the output files](#event-identity-in-the-output-files)),
+  and JAXTPC and pysupera copy each event's ids from their input.
 * **Task**: one unit of work at a stage, which is one slurm array element. A task covers a
   consecutive job range. Downstream tasks group `merge` consecutive parent
   tasks. Names encode the range, e.g. `edepsim_j000123-000123.h5` and
@@ -69,6 +75,8 @@ dprod reset-stage 3B            # delete a stage's (and downstream) outputs to r
 dprod relocate-bookkeeping      # move bookkeeping.sqlite + lock to the site's control_root
 dprod mark 1 17,20-25 --abandon --note "reason"
 dprod lookup 123 45             # all files (every stage/role) holding job 123 event 45
+dprod lookup --event-id 12345   # the same by campaign-unique event id
+dprod audit <file.h5> ...       # what a file is (campaign, stage, task, events) + bookkeeping check
 dprod files 2A -l               # registered outputs with job ranges and event counts
 dprod extend 12000              # grow stage 1 to 12000 jobs in total (not +12000); downstream tasks follow
 dprod cancel 2A --queued        # scancel queued elements; their tasks go back to 'new'
@@ -226,7 +234,8 @@ stages:
 * **Provenance and lookup:** outputs keep the full provenance chain (e.g. `edepsim -> jaxtpc_wire -> supera_wire`),
   with the derived campaign's config current and the source's under `campaign_config_history`. `lookup` finds the
   source's files and the new ones.
-* **Destroy:** `dprod destroy` of a derived campaign deletes only its own files, never the source's.
+* **Destroy:** `dprod destroy` of a derived campaign deletes only its own files, never the source's. Destroying (or
+  `reset-stage` of) the source refuses while a derived campaign inherits from it, unless you add `--allow-inherited`.
 
 The alternative is to stay within one campaign: add a stage (e.g. `supera_wire_v2` with parent `jaxtpc_wire`) with
 `dprod update-config`.
@@ -549,6 +558,94 @@ A primary's 4-position is the creation point of its interaction: the
 Only the first `attrs["n_job"/"n_event"/"n_particle"]` rows are committed, which
 makes an interrupted merge harmless: the next merge truncates the extra rows.
 
+## Event identity in the output files
+
+Every HDF5 output of every stage and role carries a small `/dprod` group,
+written by the worker (`doraemon_prod/identity.py`):
+
+```
+/dprod     @format="dprod-identity/1" @campaign @origin_campaign @stage @alias @role
+           @task_id @attempt @first_job @last_job @n_events @events_per_job
+           @created @host @dprod_version
+  events/job_id, events/job_event, events/event_id   (n_events,) int64
+```
+
+* `event_id = job_id * events_per_job + job_event` is unique within the
+  **origin campaign**, the one whose stage 1 generated the events (a derived
+  campaign keeps its source's ids: `origin_campaign` names the source).
+* In stage-1 (edep-sim) files `events/` is in the file's event order: JAXTPC and
+  pysupera read it from there and copy every event's three ids into their own
+  output (JAXTPC: attributes of each `entry_NNNNNN`; pysupera 4.1:
+  `events/{job_id,job_event,event_id}`). In other files it is sorted by `event_id`.
+* `dprod audit FILE ...` prints it, a provenance summary (stage chain, software
+  commits), and checks the file against its campaign's bookkeeping: registered,
+  same events, latest attempt. Exit code 0 only if all is consistent. Where h5py
+  is not importable (sdfiana's python3.6), it reads the files inside the site's
+  container image (`--image`, default the first besides `stage1`). `--json` gives
+  the raw data.
+* `dprod lookup --event-id N` finds every file holding an event by its event id.
+
+Outputs written before this existed have no `/dprod`; `(job id, job_event)` and
+`lookup JOB EVENT` work for them as before.
+
+### Giving an older campaign's stage 1 an identity (linked edep-sim files)
+
+To run 2A-3B with identities on a campaign whose edep-sim files have no `/dprod`,
+without modifying or copying them, make a derived campaign whose first own stage
+is `doraemon_prod.stages.link_edepsim`:
+
+```yaml
+inherit: {campaign: test_doraemon_2026_v0.2, stages: [edepsim]}
+stages:
+  edepsim_link:
+    alias: 1L
+    parent: edepsim
+    merge: 5                        # 5 stage-1 jobs per task (one link file each)
+    command: python3 -m doraemon_prod.stages.link_edepsim --outdir {outdir} {inputs}
+    outputs: "*.h5"
+    id_reader: event_table
+  jaxtpc_wire: {parent: edepsim_link, merge: 1, ...}           # --merge-output as above
+  supera_wire: {also_inputs: [edepsim_link], ...}              # --edepsim {inputs_edepsim_link}
+```
+
+Per edep-sim file it writes a file of the same name (a few KB) whose groups are
+HDF5 external links to the source file's; the worker adds this campaign's
+`/dprod` (in file order, as for stage 1) and `/provenance` to it. JAXTPC and
+pysupera read through the links as if it were the original; every downstream
+file then names the derived campaign as `campaign` and the source as
+`origin_campaign`. The source files must stay in place, which is why `destroy`
+and `reset-stage` of the source refuse while it is inherited.
+`configs/campaigns/test_doraemon_2026_v0.2.1.yaml` is a complete example;
+`tests/run_chain_test.sh` runs one (`tests/campaign_chain_derived_test.yaml`).
+
+### Merging inputs into fewer files
+
+JAXTPC (`run_batch.py --merge-output NAME`) and pysupera (a list as
+`io.input_path`) can write one output for all of a task's inputs, so a task
+merging 5 stage-1 jobs leaves one sensor/step/hits set and one pysupera file
+instead of five. In a campaign config:
+
+```yaml
+  jaxtpc_wire:
+    merge: 5
+    command: >-
+      cd {jaxtpc_dir} && python3 production/run_batch.py --data {inputs} ...
+      --outdir {outdir} --dataset sim_wire --merge-output {stage}_j{first_job:06d}-{last_job:06d}
+    outputs: "*/*.h5"               # merged files: no run_*/ subdirectories
+    provenance:
+      roles: [sensor, hits]         # hits files are a deliverable: give them provenance too
+  supera_wire:
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout wire --merged
+      --edepsim {inputs_edepsim} --jaxtpc {input_dirs} --outdir {outdir} -- {supera_args}
+```
+
+`doraemon_prod.stages.supera --merged` runs pysupera once for the task and checks
+the ids pysupera copied against the edep-sim inputs. Use it for a new campaign:
+changing a running campaign's commands this way would give one stage outputs in
+two layouts. `tests/campaign_chain_test.yaml` is a complete example, run by
+`tests/run_chain_test.sh`.
+
 ## Provenance in the output files
 
 Every output file carries the configuration that produced it, in a top-level
@@ -685,3 +782,21 @@ against the edep-sim files.
 
 `tests/test_issues.py <scratch dir>` (in `test.sif`) checks reading an output's
 `issues/` group into warnings, the summary and `n_issues`.
+
+`tests/test_identity.py <scratch dir>` checks `/dprod`, the id readers for JAXTPC
+format 2 and pysupera 4.1, the stage-3 driver's id check, `audit` and
+`lookup --event-id`, with hand-written files.
+
+```bash
+tests/run_chain_test.sh /tmp/dprod_chain    # on the host; ~30 min, mostly JAXTPC JIT
+```
+
+runs the **real** chain: 4 edep-sim jobs, JAXTPC wire and pixel with
+`--merge-output` (one task each), and pysupera with `--merged`, using the
+checkouts named by `jaxtpc_dir` and `pysupera_dir` in `configs/sites/local.yaml`.
+`tests/check_identity.py` then checks that every file has `/dprod` and that each
+event has the same `event_id` in every stage and file.
+It then strips `/dprod` from the edep-sim files (as in a campaign from before it
+existed) and runs a derived campaign (`tests/campaign_chain_derived_test.yaml`)
+that re-labels them with linked files (stage 1L) and runs 2A-3B on those, and
+checks it the same way, with the source as `origin_campaign`.

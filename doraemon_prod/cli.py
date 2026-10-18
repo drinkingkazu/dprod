@@ -20,6 +20,7 @@ Run on a login node (needs sbatch/sacct). The campaign is selected with
 """
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -52,7 +53,7 @@ def parse_ids(text):
 
 
 # commands that only read bookkeeping; everything else holds the campaign lock
-READ_ONLY = ("lookup", "files", "tasks", "watch", "sites", "configs", "campaigns", "use",
+READ_ONLY = ("lookup", "audit", "files", "tasks", "watch", "sites", "configs", "campaigns", "use",
              "relocate-bookkeeping")      # (takes the lock itself)
 
 
@@ -487,6 +488,17 @@ def cmd_move(a):
 def cmd_lookup(a):
     c = _open(a)
     stage = C.resolve_stage(c.cfg, a.stage) if a.stage else None
+    if a.event_id is not None:
+        if a.ids:
+            raise CampaignError("give JOB EVENT or --event-id, not both")
+        from .identity import split_event_id
+        epj = c.cfg["stages"][c.cfg["root_stage"]]["events_per_job"]
+        a.job, a.event = split_event_id(a.event_id, epj)
+        print("event_id %d = job %d event %d (%d events per job)" % (a.event_id, a.job, a.event, epj))
+    elif len(a.ids) == 2:
+        a.job, a.event = a.ids
+    else:
+        raise CampaignError("lookup needs JOB EVENT, or --event-id N")
     rows = D.lookup_event(c.con, a.job, a.event, stage)
     if not rows:
         print("job %d event %d: not found%s" % (a.job, a.event, " in " + stage if stage else ""))
@@ -494,6 +506,115 @@ def cmd_lookup(a):
     for r in rows:
         print("%-14s %-10s task %-6d %s" % (r["stage"], r["role"], r["task_id"],
                                             os.path.join(c.dir, r["path"])))
+
+
+def _dump_identities(site, files, image=None):
+    """identity.dump() of the files: here if h5py is importable, else inside a
+    site container image (the login-node container command, as merge-summary)."""
+    try:
+        import h5py  # noqa: F401
+        from .identity import dump
+        return dump(files)
+    except ImportError:
+        pass
+    images = list(site.get("images") or {})
+    name = image or next((n for n in images if n != "stage1"), images[0] if images else None)
+    if not name:
+        raise CampaignError("no h5py here and site %s has no container images" % site["name"])
+    prefix = C.container_prefix(site, {"name": "audit", "image": name, "container_flags": "",
+                                       "profile": None}, login=True)
+    cmd = "%s env PYTHONPATH=%s python3 -m doraemon_prod.identity dump %s" % (
+        prefix, shlex.quote(C.REPO_DIR), " ".join(shlex.quote(os.path.abspath(f)) for f in files))
+    p = subprocess.run(cmd.strip(), shell=True, stdout=subprocess.PIPE, universal_newlines=True)
+    if p.returncode != 0:
+        raise CampaignError("reading the files in image %s failed (exit %d): %s" % (name, p.returncode, cmd))
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+def _id_range(ids):
+    if not ids:
+        return "none"
+    return "%d-%d" % (min(ids), max(ids)) if len(ids) > 1 else str(ids[0])
+
+
+def cmd_audit(a):
+    from . import select as SEL
+    try:
+        site = C.load_site(SEL.pick_site(a.site, note=_note))
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    res = _dump_identities(site, a.files, a.image)
+    if a.json:
+        print(json.dumps(res, indent=1))
+        return 0
+    rc = 0
+    camps = {}
+    for r in res:
+        print(r["path"])
+        if r.get("error"):
+            print("  error: %s" % r["error"])
+            rc = 1
+            continue
+        d = r.get("identity")
+        if not d:
+            print("  no /dprod identity (not a dprod output, or made before outputs carried one)")
+            prov = r.get("provenance")
+            if prov:
+                print("  provenance: campaign %s, stages %s" % (prov.get("campaign"),
+                                                               " -> ".join(prov.get("stages") or [])))
+            rc = 1
+            continue
+        ev = d.get("events") or {}
+        eids, jobs = ev.get("event_id") or [], sorted(set(ev.get("job_id") or []))
+        origin = d.get("origin_campaign")
+        print("  campaign:    %s%s" % (d.get("campaign"), "" if origin == d.get("campaign")
+                                       else "   (events generated in %s)" % origin))
+        print("  stage:       %s%s, role %s; task %s attempt %s, jobs %s-%s" % (
+            d.get("stage"), " [%s]" % d["alias"] if d.get("alias") else "", d.get("role"),
+            d.get("task_id"), d.get("attempt"), d.get("first_job"), d.get("last_job")))
+        print("  events:      %d; event_id %s (%s events per job); job(s) %s" % (
+            len(eids), _id_range(sorted(eids)), d.get("events_per_job"), _id_range(jobs)))
+        print("  created:     %s on %s, dprod %s" % (d.get("created"), d.get("host"), d.get("dprod_version")))
+        prov = r.get("provenance")
+        if prov and not prov.get("error"):
+            print("  provenance:  %s" % " -> ".join(prov.get("stages") or []))
+            for st, sw in sorted((prov.get("software") or {}).items()):
+                if sw:
+                    print("    %-14s %s" % (st, ", ".join("%s %s" % (k, "/".join(v)) for k, v in sorted(sw.items()))))
+        elif prov:
+            print("  provenance:  unreadable (%s)" % prov["error"])
+        # the bookkeeping of the campaign that made it, if it is at this site
+        tag = d.get("campaign")
+        if tag not in camps:
+            try:
+                camps[tag] = Campaign(site, tag)
+            except CampaignError as e:
+                camps[tag] = str(e)
+        c = camps[tag]
+        if isinstance(c, str):
+            print("  bookkeeping: not checked (%s)" % c)
+            continue
+        rel = os.path.relpath(os.path.realpath(r["path"]), os.path.realpath(c.dir))
+        row = c.con.execute("SELECT * FROM files WHERE path = ?", (rel,)).fetchone()
+        if row is None:
+            print("  bookkeeping: NOT registered in %s (as %s)" % (tag, rel))
+            rc = 1
+            continue
+        reg = set((x["job_id"], x["event_id"]) for x in c.con.execute(
+            "SELECT job_id, event_id FROM events WHERE file_id = ?", (row["id"],)))
+        mine = set(zip(ev.get("job_id") or [], ev.get("job_event") or []))
+        t = c.con.execute("SELECT status, n_attempts FROM tasks WHERE stage = ? AND task_id = ?",
+                          (row["stage"], row["task_id"])).fetchone()
+        ok = reg == mine
+        print("  bookkeeping: registered (task %d %s, attempt %s); %d events %s" % (
+            row["task_id"], t["status"] if t else "?", t["n_attempts"] if t else "?", len(reg),
+            "match" if ok else "DIFFER from the file's (%d)" % len(mine)))
+        if not ok or (t and t["n_attempts"] != d.get("attempt")):
+            rc = 1
+            if t and t["n_attempts"] != d.get("attempt"):
+                print("  WARNING: the file is from attempt %s, the task's latest is %s"
+                      % (d.get("attempt"), t["n_attempts"]))
+    return rc
 
 
 def cmd_files(a):
@@ -696,6 +817,9 @@ def cmd_destroy(a):
     for p, size in plan:
         print("  %10s  %s" % (_human(size), p))
     print("  %d queued/running array element(s) will be cancelled first" % len(active))
+    inherited = c.inherited_by()
+    for tag, st in inherited:
+        print("  WARNING: campaign %s inherits %s from here and would lose its inputs" % (tag, st))
     try:
         crontab = subprocess.run(["scrontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                  universal_newlines=True, timeout=30).stdout
@@ -706,6 +830,9 @@ def cmd_destroy(a):
     if a.dry_run:
         print("[dry-run] nothing deleted")
         return
+    if inherited and not a.allow_inherited:
+        raise CampaignError("other campaigns inherit stages of %s; add --allow-inherited to destroy "
+                            "it anyway" % c.tag)
     if a.confirm is None:
         if not sys.stdin.isatty():
             raise CampaignError("not a terminal: pass --confirm %s to destroy non-interactively" % c.tag)
@@ -916,10 +1043,20 @@ def build_parser():
     p.set_defaults(func=cmd_move)
 
     p = sub.add_parser("lookup", help="find files containing (job id, event id)")
-    p.add_argument("job", type=int)
-    p.add_argument("event", type=int)
+    p.add_argument("ids", type=int, nargs="*", metavar="JOB EVENT",
+                   help="stage-1 job id and the event's number within the job")
+    p.add_argument("--event-id", type=int,
+                   help="the campaign-unique event id instead (job * events_per_job + event)")
     p.add_argument("--stage")
     p.set_defaults(func=cmd_lookup)
+
+    p = sub.add_parser("audit", help="show what dprod output files are (campaign, stage, task,"
+                       " events, provenance) and check them against the bookkeeping")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--image", help="site image to read the files in when h5py is not available here"
+                   " (default: the first besides stage1)")
+    p.add_argument("--json", action="store_true", help="print the raw identity + provenance summary")
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("files", help="list registered output files of a stage")
     p.add_argument("stage")
@@ -961,6 +1098,8 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="only show what would be deleted")
     p.add_argument("--allow-production", action="store_true",
                    help="required for tags starting with prod_")
+    p.add_argument("--allow-inherited", action="store_true",
+                   help="destroy even if other campaigns inherit its stages (they lose their inputs)")
     p.set_defaults(func=cmd_destroy)
 
     p = sub.add_parser("update-config",

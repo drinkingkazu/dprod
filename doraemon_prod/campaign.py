@@ -714,8 +714,18 @@ class Campaign:
             "time_limit_s": C.slurm_time_s(self.slurm_opts(s).get("time")),
             "slurm_override": dict(self.slurm_override),
             "web": self._web_settings(),
+            "identity": self._identity_settings(),
             "tasks": entries,
         }
+
+    def _identity_settings(self):
+        """What the worker's /dprod identity block needs (see identity.py): the
+        campaign whose stage 1 generated the events, and its events_per_job."""
+        rs = self.cfg["stages"][self.cfg["root_stage"]]
+        if not rs.get("events_per_job"):
+            return None
+        return {"origin_campaign": rs.get("external") or self.tag,
+                "events_per_job": int(rs["events_per_job"]), "root_stage": self.cfg["root_stage"]}
 
     def slurm_opts(self, s):
         opts = C.slurm_options(self.site, s)
@@ -1033,7 +1043,13 @@ class Campaign:
                 if os.path.exists(p):
                     paths.append((p, _tree_size(p)))
         active = [r for st in stages for r in self._selected_active(st, None, queued_only=False)]
-        inherited = []
+        return {"stages": stages, "tasks": tasks, "paths": paths, "active": active,
+                "inherited_by": self.inherited_by(stages)}
+
+    def inherited_by(self, stages=None):
+        """[(campaign, stage)]: other campaigns at this site that inherit this
+        campaign's stages (all, or those in `stages`), i.e. read their files."""
+        out = []
         for cfg_path in sorted(glob.glob(os.path.join(self.site["storage_root"], "*", "campaign.yaml"))):
             if os.path.realpath(os.path.dirname(cfg_path)) == os.path.realpath(self.dir):
                 continue
@@ -1042,10 +1058,9 @@ class Campaign:
             except Exception:
                 continue
             for st, sc in (other.get("stages") or {}).items():
-                if (sc or {}).get("external") == self.tag and st in stages:
-                    inherited.append((other.get("campaign"), st))
-        return {"stages": stages, "tasks": tasks, "paths": paths, "active": active,
-                "inherited_by": inherited}
+                if (sc or {}).get("external") == self.tag and (stages is None or st in stages):
+                    out.append((other.get("campaign"), st))
+        return out
 
     def reset_stage(self, stage, allow_inherited=False, wait_s=600, out=print):
         """Clear a stage and every stage below it so they run again from scratch:

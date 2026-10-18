@@ -1,0 +1,173 @@
+# Derived campaign: stages 2A-3B of test_doraemon_2026_v0.2 again, on its stage-1
+# output, with event identity and merged outputs.
+#
+# test_doraemon_2026_v0.2's edep-sim files were written before dprod wrote /dprod
+# into them. Stage 1L (doraemon_prod.stages.link_edepsim) gives each one a small
+# file (a few KB) of HDF5 external links to its groups, plus this campaign's
+# /dprod (campaign test_doraemon_2026_v0.2.1, origin_campaign
+# test_doraemon_2026_v0.2, event_id = job_id * 200 + event): nothing is copied,
+# and test_doraemon_2026_v0.2 is not modified. Its stage-1 files must stay where
+# they are (dprod refuses to reset or destroy a stage another campaign inherits).
+# New stage-1 output of test_doraemon_2026_v0.2 (e.g. jobs 10000-11999) is
+# picked up at every sync.
+#
+#   dprod init configs/campaigns/test_doraemon_2026_v0.2.1.yaml
+campaign: test_doraemon_2026_v0.2.1
+description: >
+  Test campaign: 2A/2B/3A/3B of test_doraemon_2026_v0.2 re-run on its stage-1
+  output with campaign-unique event ids, 5 stage-1 jobs per output file.
+seed: 20261017
+max_attempts: 3
+
+inherit:
+  campaign: test_doraemon_2026_v0.2     # must exist at the same site
+  stages: [edepsim]
+
+stages:
+  # ---- stage 1L: v0.2's edep-sim files, linked, with this campaign's /dprod ------
+  # merge: 5 -> one task per 5 stage-1 jobs (seconds of work); one link file per job.
+  # To put more jobs into each 2A/2B/3A/3B file, raise this merge.
+  edepsim_link:
+    alias: 1L
+    parent: edepsim
+    merge: 5
+    image: stage23
+    profile: cpu
+    command: python3 -m doraemon_prod.stages.link_edepsim --outdir {outdir} {inputs}
+    outputs: "*.h5"
+    check_imports: [h5py]
+    id_reader: event_table
+    strict_events: true
+    slurm:
+      time: "00:10:00"
+
+  # ---- stage 2A/2B: JAXTPC detector simulation ---------------------------------
+  # One task per 1L task (merge: 1), i.e. 5 stage-1 jobs, in a single process
+  # (amortizes JIT compilation); --merge-output: one sensor/step/hits set per
+  # task, each entry carrying job_id / job_event / event_id of its input event.
+  jaxtpc_wire:
+    alias: 2A
+    parent: edepsim_link
+    merge: 1
+    image: stage23
+    profile: gpu
+    command: >-
+      cd {jaxtpc_dir} && python3 production/run_batch.py
+      --data {inputs}
+      --config {detector_config}
+      --production-config {production_config}
+      --outdir {outdir} --dataset sim_wire --merge-output {stage}_j{first_job:06d}-{last_job:06d}
+      --production-version {campaign} --seed {seed}
+      --workers 12 --read-workers 4 --codec blosc-lz4
+    vars:
+      detector_config: "{jaxtpc_dir}/config/cubic_wireplane_config.yaml"
+      production_config: "{jaxtpc_dir}/config/production_cubic_wireplane_doraemon_300micro.yaml"
+    provenance:                   # embedded in the sensor and hits files
+      roles: [sensor, hits]
+      files:
+        detector_config: "{detector_config}"
+        production_config: "{production_config}"
+      software:
+        JAXTPC: "{jaxtpc_dir}"
+    outputs: "*/*.h5"             # sensor/, step/, hits/ -> file roles
+    check_imports: [h5py, hdf5plugin, jax]   # `dprod check` imports these inside the image
+    id_reader: jaxtpc
+    max_concurrent: 5
+    env:
+      PYTHONPATH: ""
+
+  jaxtpc_pixel:
+    alias: 2B
+    parent: edepsim_link
+    merge: 1
+    image: stage23
+    profile: gpu
+    command: >-
+      cd {jaxtpc_dir} && python3 production/run_batch.py
+      --data {inputs}
+      --config {detector_config}
+      --production-config {production_config}
+      --outdir {outdir} --dataset sim_pixel --merge-output {stage}_j{first_job:06d}-{last_job:06d}
+      --production-version {campaign} --seed {seed}
+      --workers 12 --read-workers 4 --codec blosc-lz4
+    vars:
+      detector_config: "{jaxtpc_dir}/config/cubic_pixel_config.yaml"
+      production_config: "{jaxtpc_dir}/config/production_cubic_pixel_doraemon_300micro.yaml"
+    provenance:                   # embedded in the sensor and hits files
+      roles: [sensor, hits]
+      files:
+        detector_config: "{detector_config}"
+        production_config: "{production_config}"
+      software:
+        JAXTPC: "{jaxtpc_dir}"
+    outputs: "*/*.h5"
+    check_imports: [h5py, hdf5plugin, jax]
+    id_reader: jaxtpc
+    max_concurrent: 5
+    env:
+      PYTHONPATH: ""
+
+  # ---- stage 3A/3B: pysupera labels -------------------------------------------
+  # One task per JAXTPC task (merge: 1). doraemon_prod.stages.supera --merged
+  # runs run_pysupera once on all the task's edep-sim files and the merged
+  # JAXTPC files: one output per task, events/job_id, job_event, event_id
+  # copied from the edep-sim files' /dprod and checked by the driver.
+  supera_wire:
+    alias: 3A
+    parent: jaxtpc_wire
+    merge: 1
+    image: stage23
+    profile: cpu
+    also_inputs: [edepsim_link]   # -> {inputs_edepsim_link}: edep-sim (link) files of the same jobs
+    input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout wire --merged
+      --edepsim {inputs_edepsim_link} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    check_imports: [h5py, pysupera]
+    id_reader: pysupera
+    provenance:
+      files:
+        pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
+        pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_wire.yaml"
+        pysupera_readout: "{pysupera_dir}/pysupera/conf/readout/jaxtpc_wire.yaml"
+      software:
+        pysupera: "{pysupera_dir}"
+    slurm:
+      mem_per_cpu: 8G
+
+  supera_pixel:
+    alias: 3B
+    parent: jaxtpc_pixel
+    merge: 1
+    image: stage23
+    profile: cpu
+    also_inputs: [edepsim_link]
+    input_roles: [hits]
+    # {pysupera_dir} first on PYTHONPATH: the checkout named in the site config is the one
+    # that runs (and the one recorded in provenance), not whatever else is importable
+    pythonpath: ["{pysupera_dir}"]
+    command: >-
+      python3 -m doraemon_prod.stages.supera --readout pixel --merged
+      --edepsim {inputs_edepsim_link} --jaxtpc {input_dirs} --outdir {outdir}
+      -- {supera_args}
+    vars:
+      supera_args: "progress=false"
+    outputs: "*.h5"
+    check_imports: [h5py, pysupera]
+    id_reader: pysupera
+    provenance:
+      files:
+        pysupera_config: "{pysupera_dir}/pysupera/conf/config.yaml"
+        pysupera_reader: "{pysupera_dir}/pysupera/conf/reader/jaxtpc_pixel.yaml"
+        pysupera_readout: "{pysupera_dir}/pysupera/conf/readout/jaxtpc_pixel.yaml"
+      software:
+        pysupera: "{pysupera_dir}"
+    slurm:
+      mem_per_cpu: 8G
