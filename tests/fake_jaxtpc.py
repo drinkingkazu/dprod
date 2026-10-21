@@ -4,6 +4,8 @@ Mimics the output layout: <outdir>/{sensor,step}/run_<id>/<dataset>_<role>_0000_
 with a `config` group (attr source_file) and one event_NNN group per event.
 Like the real run_batch.py --edepsim-ids, a run_id of 0 goes to run_unknown/.
 Optionally loads the GPU. Fails once per task if <fail_dir>/fail_<first_job> exists (then removes it).
+Skips the last event of its first input, as JAXTPC does with an event it cannot
+simulate (and still exits 0), if <fail_dir>/skip_<first_job> exists (then removes it).
 """
 import argparse
 import os
@@ -39,9 +41,19 @@ if a.fail_dir:
         print("injected failure for task starting at job %d" % a.first_job)
         sys.exit(3)
 
+skip = None
+if a.fail_dir:
+    marker = os.path.join(a.fail_dir, "skip_%d" % a.first_job)
+    if os.path.exists(marker):
+        os.remove(marker)
+        skip = a.data[0]
+
 for src in a.data:
     with h5py.File(src, "r") as f:
         table = f["event/geant4"][:]
+    if src == skip:
+        print("RuntimeError: too many segments in event %d, skipping it" % (len(table) - 1))
+        table = table[:-1]
     run_id = int(table[0]["run_id"])
     sub = "run_%010d" % run_id if run_id != 0 else "run_unknown"
     for role in ("sensor", "step"):

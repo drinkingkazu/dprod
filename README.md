@@ -77,6 +77,7 @@ dprod mark 1 17,20-25 --abandon --note "reason"
 dprod lookup 123 45             # all files (every stage/role) holding job 123 event 45
 dprod lookup --event-id 12345   # the same by campaign-unique event id
 dprod audit <file.h5> ...       # what a file is (campaign, stage, task, events) + bookkeeping check
+dprod provenance <file.h5> --stage 2A [--extract DIR]   # how it was made: settings, commands, configs
 dprod files 2A -l               # registered outputs with job ranges and event counts
 dprod extend 12000              # grow stage 1 to 12000 jobs in total (not +12000); downstream tasks follow
 dprod cancel 2A --queued        # scancel queued elements; their tasks go back to 'new'
@@ -726,6 +727,20 @@ task_blocks(p, "jaxtpc_wire")[0]["config"]["detector_config"]
 ```
 or `python3 -m doraemon_prod.provenance <file.h5> [--files]`, which prints JSON.
 
+From the command line, `dprod provenance` shows it per stage:
+```bash
+bin/dprod provenance X.h5                     # every stage of the file's chain
+bin/dprod provenance X.h5 --stage 2A          # one stage (name or alias)
+bin/dprod provenance X.h5 --stage 2A --extract DIR
+```
+For each stage: its stage config, then each task block (one per task that went into the file) with
+run time, host, slurm job, image, the command as run, seeds, software (commits, paths) and config files
+(path, sha256, size). `--extract DIR` writes the selected stages' config files exactly as used to
+`DIR/<stage>/<task block>/<name>` (e.g. `DIR/jaxtpc_wire/j000060-000064/detector_config`; checked against
+their recorded sha256), and the campaign config to `DIR/campaign.yaml`. With several files, each gets
+`DIR/<file name>/`. `--json` prints the raw data. Like `audit`, it reads the files inside the site's
+container image where h5py is not importable (`--image`).
+
 ## Resource monitoring
 
 Every job runs a sampler thread (every `monitor_interval` s, default 10) that records:
@@ -747,7 +762,19 @@ JAXTPC measure that pool, not actual use, unless `XLA_PYTHON_CLIENT_PREALLOCATE=
   `COMMAND NOT FOUND`, `Batch is interrupted`, etc.
 * Every output file is opened and its `(job, event)` ids are read (`idreaders.py`):
   stage 1 must hold exactly events `0..N-1` of its job; downstream files must stay within the task's job range and have no duplicates.
-  If event counts differ from the inputs, that's a warning, or a failure with `strict_events: true`.
+* **Every output role must hold exactly the task's input events.** The controller gives each task the
+  `(job, event)` set of its inputs; after the command, the worker compares every role's events (e.g. JAXTPC
+  sensor, step, hits) with it. An event missing from a role fails the task: the message lists the missing
+  events and quotes the stage log's lines that mention skipping (JAXTPC's `[SKIP ...]`), and nothing is
+  registered. Without this, JAXTPC skipping an event it cannot simulate (a handled `RuntimeError`, exit 0)
+  would look done, and pysupera, which needs every `entry_NNNNNN`, would fail later.
+  A stage that may drop events by design opts out in its config:
+  ```yaml
+    jaxtpc_wire:
+      allow_missing_events: true    # missing events: a warning in the task's note, not a failure
+  ```
+  Its downstream tasks then expect only the events it kept. An event that is not among the inputs always
+  fails the task. (`strict_events` is obsolete: the check is strict by default.)
 * Outputs are copied to storage under a temp name and renamed atomically. A missing
   summary after the scheduler reports a terminal state (TIMEOUT, OOM, PREEMPTED, ...) is a failure.
 

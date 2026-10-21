@@ -526,8 +526,18 @@ class Campaign:
                 " WHERE f.stage = ? AND t.status = 'done' AND f.first_job >= ? AND f.last_job <= ?"
                 " ORDER BY f.first_job, f.role, f.path", (anc, t["first_job"], t["last_job"]))
             e["extra_inputs"][anc] = [os.path.join(self.dir, r["path"]) for r in rows]
-        e["expected_events"] = sum(p["n_events"] or 0 for p in done)
         ids = [p["task_id"] for p in done]
+        # the events this task is given: every output role must hold exactly these
+        # (unless the stage sets allow_missing_events), checked by the worker
+        q = ("SELECT DISTINCT e.job_id, e.event_id FROM events e JOIN files f ON f.id = e.file_id"
+             " WHERE f.stage = ? AND f.task_id IN (%s)" % ",".join("?" * len(ids)))
+        args = [ps["name"]] + ids
+        if roles:
+            q += " AND f.role IN (%s)" % ",".join("?" * len(roles))
+            args += list(roles)
+        pairs = self.con.execute(q, args).fetchall()
+        e["expected"] = L.pack_events(pairs)
+        e["expected_events"] = len(pairs)
         e["n_input_jobs"] = self.con.execute(
             "SELECT COUNT(DISTINCT e.job_id) FROM events e JOIN files f ON f.id = e.file_id"
             " WHERE f.stage = ? AND f.task_id IN (%s)" % ",".join("?" * len(ids)),

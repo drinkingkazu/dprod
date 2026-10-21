@@ -258,6 +258,57 @@ def provenance_record(m, task, fmt, work, auto_files=None, auto_software=None,
                    inputs=task.get("inputs"), env=m["env"])
 
 
+def _pairs_text(pairs, n=5):
+    p = sorted(pairs)
+    return ", ".join("(job %d, event %d)" % x for x in p[:n]) + (", ..." if len(p) > n else "")
+
+
+def check_events(per_role, task, allow_missing, logfile=None):
+    """Every output role must hold exactly the task's input events.
+
+    per_role: {role: {(job, event)}} read from the outputs. Events that are not
+    among the inputs always fail the task; missing ones fail it unless the stage
+    sets allow_missing_events (then: warnings). Returns the warnings."""
+    want = layout.unpack_events(task["expected"]) if task.get("expected") is not None else None
+    n_want = len(want) if want is not None else task.get("expected_events")
+    warnings, errors = [], []
+    for role, got in sorted(per_role.items()):
+        if want is not None:
+            extra, missing = got - want, want - got
+        else:                          # a manifest from before the event sets: counts only
+            extra = set()
+            missing = set(range(n_want - len(got))) if n_want is not None and len(got) < n_want else set()
+            if n_want is not None and len(got) > n_want:
+                errors.append("role %s has %d events, the inputs had %d" % (role, len(got), n_want))
+        if extra:
+            errors.append("role %s has %d event(s) that are not among the task's inputs: %s"
+                          % (role, len(extra), _pairs_text(extra)))
+        if missing:
+            msg = "role %s is missing %d of %d input event(s)%s" % (
+                role, len(missing), n_want, ": " + _pairs_text(missing) if want is not None else "")
+            (warnings if allow_missing else errors).append(msg)
+    if errors:
+        hint = "" if allow_missing else (
+            "\n(the stage dropped events; if that is acceptable for this stage, set"
+            " allow_missing_events: true in its config)")
+        raise TaskFailure("; ".join(errors) + hint + _skip_lines(logfile))
+    return warnings
+
+
+def _skip_lines(logfile, n=5):
+    """Lines of the stage's log that mention skipping, to say why events are missing."""
+    if not logfile or not os.path.exists(logfile):
+        return ""
+    hits = []
+    with open(logfile, errors="replace") as f:
+        for line in f:
+            if "skip" in line.lower():
+                hits.append(line.rstrip())
+    if not hits:
+        return ""
+    return "\nfrom %s:\n%s" % (os.path.basename(logfile), "\n".join(hits[-n:]))
+
+
 def run_command(m, task, work, env):
     sc = m["stage_config"]
     outdir = os.path.join(work, "out")
@@ -325,13 +376,7 @@ def run_command(m, task, work, env):
             warnings.append(line)
         outputs.append(o)
 
-    expected = task.get("expected_events")
-    for role, evs in per_role.items():
-        if expected is not None and len(evs) != expected:
-            msg = "role %s has %d events, inputs had %d" % (role, len(evs), expected)
-            if sc.get("strict_events"):
-                raise TaskFailure(msg)
-            warnings.append(msg)
+    warnings += check_events(per_role, task, sc.get("allow_missing_events"), logfile)
     # provenance goes into the outputs of the configured roles (default: all)
     from .provenance import write as write_provenance
     roles = (sc.get("provenance") or {}).get("roles")

@@ -37,7 +37,6 @@ stages:
     outputs: "*.h5"
     check_imports: [h5py]
     id_reader: event_table
-    strict_events: true
     slurm:
       time: "00:10:00"
 

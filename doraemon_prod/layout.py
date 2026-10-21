@@ -71,6 +71,24 @@ def logs_rel_path(stage, name, attempt):
     return "logs/%s/%s_a%02d.tgz" % (stage, name, attempt)
 
 
+def pack_events(pairs):
+    """{(job, event)} -> {"job": [[first, last], ...]}: runs of consecutive events
+    (compact in a JSON manifest: a job's events 0..199 are one run)."""
+    by_job = {}
+    for j, e in sorted(set((int(j), int(e)) for j, e in pairs)):
+        runs = by_job.setdefault(str(j), [])
+        if runs and runs[-1][1] == e - 1:
+            runs[-1][1] = e
+        else:
+            runs.append([e, e])
+    return by_job
+
+
+def unpack_events(packed):
+    """Inverse of pack_events: a set of (job, event)."""
+    return set((int(j), e) for j, runs in packed.items() for a, b in runs for e in range(a, b + 1))
+
+
 def derive_seed(master_seed, *keys, bits=31):
     """Deterministic, well-mixed seed in [1, 2**bits) from a master seed + keys.
 

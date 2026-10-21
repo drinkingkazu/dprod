@@ -433,10 +433,101 @@ def task_blocks(prov, stage):
     return [s[k] for k in sorted(s) if k.startswith("j") and isinstance(s[k], dict)]
 
 
+def _safe(name):
+    return str(name).replace(os.sep, "_").replace("|", "_") or "_"
+
+
+def view(path, stage=None, extract=None):
+    """What `dprod provenance` shows: {path, campaign, stages, campaign_config,
+    blocks: [{stage, alias, handler, stage_config, tasks: [...]}], written, error}.
+
+    blocks: every stage of the file's chain, or only `stage` (name or alias). Each
+    task block has its attributes (command, host, ...), seeds, software,
+    container, environment, inputs, and its config files as {name: {path,
+    sha256, chars}} (no texts). With `extract` (a directory), the selected
+    stages' config files are written to <extract>/<stage>/<task block>/<name>
+    exactly as recorded (checked against the recorded sha256), and the campaign
+    config to <extract>/campaign.yaml."""
+    out = {"path": os.path.abspath(path), "written": []}
+    try:
+        prov = read_provenance(path)
+    except Exception as e:
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+        return out
+    if prov is None:
+        out["error"] = "no /%s group" % GROUP
+        return out
+    stages = prov.get("stages") or []
+    stages = [stages] if isinstance(stages, str) else list(stages)
+    cc = prov.get("campaign_config") or {}
+    out.update(campaign=prov.get("campaign"), stages=stages,
+               campaign_config={"path": cc.get("path"), "sha256": cc.get("sha256")}, blocks=[])
+    if stage is not None:
+        want = [st for st in stages if st.lower() == str(stage).lower() or
+                str((prov.get(st) or {}).get("alias") or "").lower() == str(stage).lower()]
+        if not want:
+            out["error"] = "no stage %r in this file's provenance (stages: %s)" % (
+                stage, ", ".join("%s [%s]" % (st, (prov.get(st) or {}).get("alias")) for st in stages))
+            return out
+    else:
+        want = stages
+    texts = []                                   # (relative path, text, sha256)
+    if extract and cc.get("campaign.yaml") is not None:
+        texts.append(("campaign.yaml", cc["campaign.yaml"], cc.get("sha256")))
+    for st in want:
+        s = prov.get(st) or {}
+        b = {"stage": st, "alias": s.get("alias"), "handler": s.get("handler"),
+             "stage_config": s.get("stage_config") or {}, "tasks": []}
+        for name in sorted(k for k in s if k.startswith("j") and isinstance(s[k], dict)):
+            blk = s[name]
+            files = {}
+            fg = blk.get("files") or {}
+            for k, v in fg.items():
+                if k.endswith(".path") or k.endswith(".sha256"):
+                    continue
+                files[k] = {"path": fg.get(k + ".path"), "sha256": fg.get(k + ".sha256"),
+                            "chars": len(v) if isinstance(v, str) else None}
+                if extract and isinstance(v, str):
+                    texts.append((os.path.join(_safe(st), _safe(name), _safe(k)), v, fg.get(k + ".sha256")))
+            t = {k: v for k, v in blk.items() if not isinstance(v, (dict, list))}
+            t.update(block=name, seeds=blk.get("seeds") or {}, software=blk.get("software") or {},
+                     container=blk.get("container") or {}, environment=blk.get("environment") or {},
+                     inputs=blk.get("inputs") or [], files=files)
+            b["tasks"].append(t)
+        out["blocks"].append(b)
+    for rel, text, sha in texts:
+        if sha and sha256_text(text) != sha:
+            out["error"] = "%s: text does not match its recorded sha256; not written" % rel
+            return out
+        dest = os.path.join(os.path.abspath(extract), rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", newline="") as f:   # as recorded: no newline translation
+            f.write(text)
+        out["written"].append(dest)
+    return out
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "view":       # for `dprod provenance` (JSON on one line)
+        import argparse
+        ap = argparse.ArgumentParser(prog="python3 -m doraemon_prod.provenance view")
+        ap.add_argument("files", nargs="+")
+        ap.add_argument("--stage")
+        ap.add_argument("--extract")
+        a = ap.parse_args(argv[1:])
+        res = []
+        for p in a.files:
+            ex = a.extract
+            if ex and len(a.files) > 1:
+                ex = os.path.join(ex, os.path.splitext(os.path.basename(p))[0])
+            res.append(view(p, a.stage, ex))
+        json.dump(res, sys.stdout, default=str)
+        sys.stdout.write("\n")
+        return 0
     if not argv:
-        print("usage: python3 -m doraemon_prod.provenance <file.h5> [--files]")
+        print("usage: python3 -m doraemon_prod.provenance <file.h5> [--files]\n"
+              "       python3 -m doraemon_prod.provenance view <file.h5> ... [--stage S] [--extract DIR]")
         return 2
     p = read_provenance(argv[0])
     if p is None:

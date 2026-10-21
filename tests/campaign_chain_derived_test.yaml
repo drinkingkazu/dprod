@@ -21,7 +21,6 @@ stages:
     command: python3 -m doraemon_prod.stages.link_edepsim --outdir {outdir} {inputs}
     outputs: "*.h5"
     id_reader: event_table
-    strict_events: true
 
   jaxtpc_wire:
     alias: 2A

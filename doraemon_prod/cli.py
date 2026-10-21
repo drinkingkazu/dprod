@@ -53,7 +53,7 @@ def parse_ids(text):
 
 
 # commands that only read bookkeeping; everything else holds the campaign lock
-READ_ONLY = ("lookup", "audit", "files", "tasks", "watch", "sites", "configs", "campaigns", "use",
+READ_ONLY = ("lookup", "audit", "provenance", "files", "tasks", "watch", "sites", "configs", "campaigns", "use",
              "relocate-bookkeeping")      # (takes the lock itself)
 
 
@@ -508,33 +508,131 @@ def cmd_lookup(a):
                                             os.path.join(c.dir, r["path"])))
 
 
-def _dump_identities(site, files, image=None):
-    """identity.dump() of the files: here if h5py is importable, else inside a
-    site container image (the login-node container command, as merge-summary)."""
+def _read_files(site, image, local, module, args):
+    """local() if h5py is importable here, else `python3 -m <module> <args>` inside a
+    site container image (the login-node container command, as merge-summary),
+    which prints its result as JSON on its last line."""
     try:
         import h5py  # noqa: F401
-        from .identity import dump
-        return dump(files)
     except ImportError:
         pass
+    else:
+        return local()
     images = list(site.get("images") or {})
     name = image or next((n for n in images if n != "stage1"), images[0] if images else None)
     if not name:
         raise CampaignError("no h5py here and site %s has no container images" % site["name"])
     prefix = C.container_prefix(site, {"name": "audit", "image": name, "container_flags": "",
                                        "profile": None}, login=True)
-    cmd = "%s env PYTHONPATH=%s python3 -m doraemon_prod.identity dump %s" % (
-        prefix, shlex.quote(C.REPO_DIR), " ".join(shlex.quote(os.path.abspath(f)) for f in files))
+    cmd = "%s env PYTHONPATH=%s python3 -m %s %s" % (
+        prefix, shlex.quote(C.REPO_DIR), module, " ".join(shlex.quote(x) for x in args))
     p = subprocess.run(cmd.strip(), shell=True, stdout=subprocess.PIPE, universal_newlines=True)
     if p.returncode != 0:
         raise CampaignError("reading the files in image %s failed (exit %d): %s" % (name, p.returncode, cmd))
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
+def _dump_identities(site, files, image=None):
+    """identity.dump() of the files, here or inside a site image (_read_files)."""
+    def local():
+        from .identity import dump
+        return dump(files)
+    return _read_files(site, image, local, "doraemon_prod.identity",
+                       ["dump"] + [os.path.abspath(f) for f in files])
+
+
 def _id_range(ids):
     if not ids:
         return "none"
     return "%d-%d" % (min(ids), max(ids)) if len(ids) > 1 else str(ids[0])
+
+
+def _print_tree(d, indent):
+    """Nested dict/list as indented `key: value` lines."""
+    for k, v in (d.items() if isinstance(d, dict) else enumerate(d)):
+        if isinstance(v, dict) and v or isinstance(v, list) and any(isinstance(x, (dict, list)) for x in v):
+            print("%s%s:" % (indent, k))
+            _print_tree(v, indent + "  ")
+        else:
+            print("%s%s: %s" % (indent, k, " ".join(map(str, v)) if isinstance(v, list) else v))
+
+
+def _software_line(info):
+    if not isinstance(info, dict):
+        return str(info)
+    v = info.get("git_describe") or str(info.get("git_commit") or info.get("sha256") or "")[:12]
+    if v and info.get("git_dirty") in (True, 1, "True") and not str(v).endswith("dirty"):
+        v += "-dirty"
+    return "%s  %s%s" % (v or "-", info.get("path") or "",
+                         "  (%s)" % info["git_remote"] if info.get("git_remote") else "")
+
+
+def cmd_provenance(a):
+    from . import select as SEL
+    try:
+        site = C.load_site(SEL.pick_site(a.site, note=_note))
+    except SEL.SelectError as e:
+        raise CampaignError(str(e))
+    files = [os.path.abspath(f) for f in a.files]
+    extract = os.path.abspath(a.extract) if a.extract else None
+
+    def local():
+        from .provenance import view
+        return [view(f, a.stage, extract if len(files) == 1 or not extract else
+                     os.path.join(extract, os.path.splitext(os.path.basename(f))[0])) for f in files]
+    args = ["view"] + files + (["--stage", a.stage] if a.stage else []) + \
+        (["--extract", extract] if extract else [])
+    res = _read_files(site, a.image, local, "doraemon_prod.provenance", args)
+    if a.json:
+        print(json.dumps(res, indent=1, default=str))
+        return 0 if all(not r.get("error") for r in res) else 1
+    rc = 0
+    for r in res:
+        print(r["path"])
+        if r.get("error") and not r.get("blocks"):
+            print("  error: %s" % r["error"])
+            rc = 1
+            continue
+        print("  campaign:  %s   stages: %s" % (r.get("campaign"), " -> ".join(r.get("stages") or [])))
+        cc = r.get("campaign_config") or {}
+        print("  campaign config: %s (sha256 %s)" % (cc.get("path"), str(cc.get("sha256"))[:12]))
+        for b in r.get("blocks") or []:
+            print("  ---- %s%s, handler %s" % (b["stage"], " [%s]" % b["alias"] if b.get("alias") else "",
+                                              b.get("handler")))
+            if b.get("stage_config"):
+                print("    stage config:")
+                _print_tree(b["stage_config"], "      ")
+            for t in b["tasks"]:
+                print("    task block %s: task %s attempt %s, jobs %s-%s" % (
+                    t["block"], t.get("task_id"), t.get("attempt"), t.get("first_job"), t.get("last_job")))
+                created = t.get("created")
+                if isinstance(created, (int, float)):
+                    created = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(created))
+                print("      ran:      %s on %s, slurm job %s, dprod %s" % (
+                    created, t.get("host"), t.get("slurm_job_id"), t.get("dprod_version")))
+                if t.get("image"):
+                    print("      image:    %s" % t["image"])
+                if t.get("command"):
+                    print("      command:  %s" % t["command"])
+                if t.get("seeds"):
+                    print("      seeds:    %s" % ", ".join("%s=%s" % kv for kv in sorted(t["seeds"].items())))
+                for name, info in sorted((t.get("software") or {}).items()):
+                    print("      software: %-14s %s" % (name, _software_line(info)))
+                for name, info in sorted((t.get("files") or {}).items()):
+                    print("      file:     %-18s %s (sha256 %s, %s chars)" % (
+                        name, info.get("path"), str(info.get("sha256"))[:12], info.get("chars")))
+                if t.get("environment"):
+                    print("      env:      %s" % " ".join("%s=%s" % kv for kv in sorted(t["environment"].items())))
+                ins = t.get("inputs") or []
+                if ins:
+                    print("      inputs:   %d file(s): %s%s" % (len(ins), ", ".join(os.path.basename(x) for x in ins[:3]),
+                                                             ", ..." if len(ins) > 3 else ""))
+        for w in r.get("written") or []:
+            print("  wrote %s" % w)
+        if r.get("error"):
+            print("  error: %s" % r["error"])
+            rc = 1
+    return rc
 
 
 def cmd_audit(a):
@@ -1057,6 +1155,18 @@ def build_parser():
                    " (default: the first besides stage1)")
     p.add_argument("--json", action="store_true", help="print the raw identity + provenance summary")
     p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("provenance", help="show how a file was made, per stage (settings, commands,"
+                       " software, config files); --extract writes the config files out")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--stage", help="only this stage of the file's chain (name or alias, e.g. 2A)")
+    p.add_argument("--extract", metavar="DIR",
+                   help="write the (selected) stages' config files, as used, to DIR/<stage>/<task block>/"
+                        " and the campaign config to DIR/campaign.yaml (DIR/<file name>/... for several files)")
+    p.add_argument("--image", help="site image to read the files in when h5py is not available here"
+                   " (default: the first besides stage1)")
+    p.add_argument("--json", action="store_true", help="print the raw data")
+    p.set_defaults(func=cmd_provenance)
 
     p = sub.add_parser("files", help="list registered output files of a stage")
     p.add_argument("stage")

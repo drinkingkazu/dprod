@@ -58,7 +58,10 @@ STAGE_DEFAULTS = {
     "outputs": "**/*.h5",
     "id_reader": None,
     "id_reader_options": {},
-    "strict_events": False,
+    # every output role must hold exactly the task's input events; true: a stage
+    # may drop events (e.g. JAXTPC skipping one it cannot simulate) -> warning only
+    "allow_missing_events": False,
+    "strict_events": None,         # obsolete (the check is strict by default); ignored
     "input_roles": None,           # restrict parent file roles passed as {inputs}
     "also_inputs": [],             # ancestor stages whose files are passed as {inputs_<stage>}
     "enabled": True,               # false: defined and tracked, but submit refuses

@@ -45,6 +45,13 @@ all_done "$C"
 D2 lookup --event-id 7                       # job 2, event 1: one file per stage and role
 D2 audit $(find "$C/data/jaxtpc_wire" -name "*hits*.h5") $(find "$C/data/supera_pixel" -name "*.h5")
 apptainer exec -B /home/kazu,/tmp "$IMG23" python3 "$HERE/tests/check_identity.py" "$C" 3
+# how a 3B file was made: its 2B stage, and 2B's config files written out as used
+F3B=$(find "$C/data/supera_pixel" -name "*.h5" | head -1)
+D2 provenance "$F3B" --stage 2B --extract "$ROOT/prov2B" | grep -q "task block j000000-000003"
+cmp "$ROOT/prov2B/campaign.yaml" "$C/campaign.yaml"
+cmp "$ROOT/prov2B/jaxtpc_pixel/j000000-000003/detector_config" \
+    "$(sed -n 's/^ *jaxtpc_dir: *//p' "$ROOT/site.yaml" | head -1)/config/cubic_pixel_config.yaml"
+D2 provenance "$F3B" --stage 9Z && exit 1 || true          # not in the file's chain: error
 
 # derived campaign: stage-1 files without /dprod (as written before dprod wrote
 # it), re-labelled through HDF5 external links (stages.link_edepsim), then 2A-3B
