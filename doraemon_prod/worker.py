@@ -158,10 +158,20 @@ def run_edepsim(m, task, work, env):
     for pat in EDEPSIM_LOG_ERRORS:
         if pat in text:
             raise TaskFailure("edep-sim log contains %r\n%s" % (pat, tail(logfile)))
-    if not os.path.exists(out):
+    # /edep/db/set/stepTruth true: a step and an mctruth file instead of one file
+    base = out[:-3]
+    split = {r: "%s_%s.h5" % (base, r) for r in ("step", "mctruth")}
+    if all(os.path.exists(p) for p in split.values()):
+        files = split
+    elif os.path.exists(out):
+        files = {m["stage"]: out}
+    else:
         raise TaskFailure("edep-sim produced no output file")
-
-    ids = read_ids("edepsim", out, os.path.basename(out))
+    all_ids = {r: read_ids("edepsim", p, os.path.basename(p)) for r, p in files.items()}
+    ids = next(iter(all_ids.values()))
+    if any(x != ids for x in all_ids.values()):
+        raise TaskFailure("step and mctruth hold different events")
+    out = files.get("mctruth", out)
     if list(ids) != [job]:
         raise TaskFailure("output run_id(s) %s != job id %d" % (sorted(ids), job))
     if ids[job] != list(range(n_ev)):
@@ -170,8 +180,8 @@ def run_edepsim(m, task, work, env):
     import h5py
     with h5py.File(out, "r") as f:
         t = f["event/geant4"][:]
-    _write_identity(out, m, task, m["stage"], list(zip(t["run_id"], t["event_id"])),
-                    order="file")
+    for role, p in files.items():
+        _write_identity(p, m, task, role, list(zip(t["run_id"], t["event_id"])), order="file")
 
     from .provenance import write as write_provenance
     fmt = template_vars(m, task, work, work)
@@ -182,7 +192,8 @@ def run_edepsim(m, task, work, env):
     rec = provenance_record(m, task, fmt, work, auto_files=auto,
                             auto_software={"edep-sim": exe_path},
                             command=" ".join(shlex.quote(c) for c in cmd))
-    write_provenance(out, rec)
+    for p in files.values():
+        write_provenance(p, rec)
 
     from .summary import SummaryError, extract_edepsim
     try:
@@ -190,9 +201,14 @@ def run_edepsim(m, task, work, env):
     except (SummaryError, KeyError, ValueError) as e:
         raise TaskFailure("job summary extraction failed: %s" % e)
 
-    rel = "%s/%s.h5" % (layout.data_rel_dir(m["stage"], job), task["name"])
-    return [{"local": out, "rel": rel, "role": m["stage"], "events": ids,
-             "summary_tables": tables}], []
+    res = []
+    for role, p in files.items():
+        o = {"local": p, "role": role, "events": ids,
+             "rel": "%s/%s" % (layout.data_rel_dir(m["stage"], job), os.path.basename(p))}
+        if p == out:
+            o["summary_tables"] = tables
+        res.append(o)
+    return res, []
 
 
 def _table_pairs(path, options=None):

@@ -89,8 +89,13 @@ def extract_edepsim(path):
     """Event and primary-particle tables from an edep-sim HDF5 file (local fence posts)."""
     with h5py.File(path, "r") as f:
         ev = f["event/geant4"][:]
-        prim = f["primary/geant4"]
-        vert = f["vertex/geant4"]
+        if "schema" in f:       # mctruth file: one group per event
+            ent = ["entry_%06d" % i for i in range(len(ev))]
+            prim = [f[e]["primary"][()] for e in ent]
+            vert = [f[e]["vertex"][()] for e in ent]
+        else:
+            prim = f["primary/geant4"]
+            vert = f["vertex/geant4"]
         events = np.zeros(len(ev), EVENT_DTYPE)
         chunks = []
         start = 0
