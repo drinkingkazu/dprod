@@ -130,7 +130,9 @@ def main(argv=None):
     # the pixel reader reads hits as the detected image and needs the sensor file
     roles = ("step", "hits", "sensor") if a.readout == "pixel" else ("step", "hits")
     split = {r: [p for p in a.edepsim if p.endswith("_%s.h5" % r)] for r in ("step", "mctruth")}
-    if split["step"]:
+    if any(split.values()):
+        if sum(map(len, split.values())) != len(a.edepsim):
+            raise IdReadError("step/mctruth files mixed with other edep-sim files")
         return run_format3(a, exe, split, extra)
     files = index_jaxtpc(a.jaxtpc, roles)
     if a.merged:
