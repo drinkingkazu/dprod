@@ -129,6 +129,11 @@ def main(argv=None):
         exe = [sys.executable, "-m", "pysupera._run"]
     # the pixel reader reads hits as the detected image and needs the sensor file
     roles = ("step", "hits", "sensor") if a.readout == "pixel" else ("step", "hits")
+    split = {r: [p for p in a.edepsim if p.endswith("_%s.h5" % r)] for r in ("step", "mctruth")}
+    if any(split.values()):
+        if sum(map(len, split.values())) != len(a.edepsim):
+            raise IdReadError("step/mctruth files mixed with other edep-sim files")
+        return run_format3(a, exe, split, extra)
     files = index_jaxtpc(a.jaxtpc, roles)
     if a.merged:
         return run_merged(a, exe, roles, files, extra)
@@ -202,6 +207,50 @@ def run_merged(a, exe, roles, files, extra):
     how = tag_ids(out, events)
     log("done: %d events of %d job(s) in %.1f s -> %s (ids %s)" % (
         len(events), len(inputs), time.time() - t0, os.path.basename(out), how))
+    return 0
+
+
+def run_format3(a, exe, split, extra):
+    """Step and mctruth files of all the jobs, with the task's sensor, hits and
+    presupera files: one run, one label file."""
+    by_job = {}
+    for role, paths in split.items():
+        for p in paths:
+            events = edepsim_events(p)
+            jobs = {j for j, _ in events}
+            if len(jobs) != 1:
+                raise IdReadError("%s holds %d jobs; expected one" % (p, len(jobs)))
+            by_job.setdefault(jobs.pop(), {})[role] = (p, events)
+    for job, d in by_job.items():
+        if set(d) != {"step", "mctruth"} or d["step"][1] != d["mctruth"][1]:
+            raise IdReadError("job %d: step and mctruth files do not match" % job)
+    jobs = sorted(by_job)
+    roles = ("hits", "presupera", "sensor")
+    files = index_jaxtpc(a.jaxtpc, roles)
+    out = os.path.join(a.outdir, "supera_%s_j%0*d-%0*d.h5" % (
+        a.readout, JOB_DIGITS, jobs[0], JOB_DIGITS, jobs[-1]))
+    cmd = exe + ["reader=jaxtpc_%s" % a.readout,
+                 "io.input_path=%s" % hydra_list([by_job[j]["mctruth"][0] for j in jobs]),
+                 "reader.jaxtpc_seg_path=%s" % hydra_list([by_job[j]["step"][0] for j in jobs]),
+                 "io.output_path=%s" % out, "io.layout=label"]
+    key = {"hits": "reader.jaxtpc_inst_path", "presupera": "reader.jaxtpc_presupera_path",
+           "sensor": "reader.jaxtpc_sensor_path"}
+    for r in roles:
+        if r == "sensor" and a.readout == "wire":
+            continue
+        paths = [files[r].get(j) for j in jobs]
+        if not all(paths):
+            raise IdReadError("JAXTPC %s file missing for a job of %s" % (r, jobs))
+        cmd.append("%s=%s" % (key[r], paths[0] if len(set(paths)) == 1 else hydra_list(paths)))
+    cmd += extra
+    log("jobs %d-%d: %s" % (jobs[0], jobs[-1], " ".join(shlex.quote(c) for c in cmd)))
+    t0 = time.time()
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        log("run_pysupera failed (exit code %d)" % rc)
+        return rc
+    how = tag_ids(out, [e for j in jobs for e in by_job[j]["step"][1]])
+    log("done in %.1f s -> %s (ids %s)" % (time.time() - t0, os.path.basename(out), how))
     return 0
 
 
